@@ -12,10 +12,16 @@
  *          bars and tempo), LOOP, play/stop -- play starts at the selected
  *          block
  *   lanes  a header per track (tap: mute), the timeline beside them
- *   tools  move the selected block a bar left/right, DUP after it, DEL,
- *          ADD a clip from the project's library to the selected track, LEN
- *          (how many bars the song plays and loops over: set, or up to its
- *          last block) and zoom out/in on the timeline
+ *   tools  MOVE, DUP and DEL act on the selected block; ADD a clip from the
+ *          project's library to the selected track, LEN (how many bars the
+ *          song plays and loops over: set, or up to its last block) and zoom
+ *          out/in on the timeline
+ *
+ * The encoder walks the blocks; a click on one selects it and takes the
+ * encoder down to MOVE/DUP/DEL. DUP and DEL act and bring it back to the
+ * blocks; MOVE is turned -- each detent a bar -- and the next click brings it
+ * back. The power button's click also goes back up. The songs list edits the
+ * open song: its tempo (each song has its own) and its name.
  *
  * Everything goes through crosspad::ISongEngine: edits are made on its song
  * under songMutex() and committed, which hands playback the new arrangement
@@ -64,7 +70,7 @@ constexpr uint32_t kMaxLength = 999;
 constexpr int32_t  kRulerH   = 12;
 constexpr int32_t  kLaneH    = 30;
 constexpr int32_t  kLaneGap  = 2;
-constexpr int32_t  kHeadW    = 24;
+constexpr int32_t  kHeadW    = 40;     // a finger's width: tap to mute
 constexpr uint32_t kTickMs   = 50;
 constexpr int      kMaxBlocks = 64;
 /// Drawn blocks per track: a long track must not use up the ones the others need.
@@ -105,7 +111,10 @@ lv_obj_t* s_playBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
 lv_obj_t* s_heads[kTracks] = {};
-lv_obj_t* s_tools[8] = {};
+/* MOVE, DUP, DEL (the selected block's, reached by clicking it), then ADD,
+ * LEN, zoom out, zoom in. */
+constexpr int kBlockTools = 3;
+lv_obj_t* s_tools[7] = {};
 lv_obj_t* s_lenLabel = nullptr;     // the value in the LEN window
 lv_obj_t* s_backBtn = nullptr;
 lv_obj_t* s_projBtn = nullptr;
@@ -128,12 +137,17 @@ uint32_t  s_pendingGen = 0;
 lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
+/* A rename or tempo change the platform is doing on the card. */
+bool      s_editing = false;
+bool      s_editIsRename = false;
 
 #ifdef ARR_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
 lv_group_t* s_prevEncGroup = nullptr;
 lv_group_t* s_overlayGroup = nullptr;
+lv_group_t* s_toolGroup = nullptr;    // MOVE/DUP/DEL while a block is clicked
 #endif
+bool s_toolMode = false;
 
 crosspad::ISongEngine* engine()
 {
@@ -208,12 +222,15 @@ void select(int track, int index)
     update_info();
 }
 
+void enter_tools();
+
 void block_cb(lv_event_t* e)
 {
     const int k = (int)(intptr_t)lv_event_get_user_data(e);
     if (k < 0 || k >= s_blockCount) return;
     select(s_blocks[k].track, s_blocks[k].index);
     if (s_blocks[k].obj) lv_obj_scroll_to_view(s_blocks[k].obj, LV_ANIM_ON);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) enter_tools();
 }
 
 void rebuild_group()
@@ -228,8 +245,10 @@ void rebuild_group()
     lv_group_add_obj(s_encGroup, s_loopBtn);
     lv_group_add_obj(s_encGroup, s_playBtn);
     for (int i = 0; i < s_blockCount; ++i) lv_group_add_obj(s_encGroup, s_blocks[i].obj);
-    for (auto* t : s_tools) if (t) lv_group_add_obj(s_encGroup, t);
     for (auto* h : s_heads) if (h) lv_group_add_obj(s_encGroup, h);
+    for (int t = kBlockTools; t < (int)(sizeof(s_tools) / sizeof(s_tools[0])); ++t) {
+        if (s_tools[t]) lv_group_add_obj(s_encGroup, s_tools[t]);
+    }
     bool alive = false;
     for (uint32_t k = 0; k < lv_group_get_obj_count(s_encGroup); ++k) {
         if (lv_group_get_obj_by_index(s_encGroup, k) == focused) { alive = true; break; }
@@ -412,6 +431,8 @@ void sync_transport()
 
 void fill_clips();
 void fill_projects();
+void show_tempo();
+void rename_failed();
 
 void tick_cb(lv_timer_t*)
 {
@@ -432,6 +453,15 @@ void tick_cb(lv_timer_t*)
         if (st == crosspad::SongOpState::Failed && s_infoLabel) {
             lv_label_set_text(s_infoLabel, "That song could not be read; it is left untouched on the card.");
         }
+    }
+    if (s_editing && se->editState() != crosspad::SongOpState::Busy) {
+        s_editing = false;
+        const bool failed = se->editState() == crosspad::SongOpState::Failed;
+        show_tempo();                 // the tempo row, if its window is still open
+        rebuild_timeline();
+        update_info();
+        if (failed && s_editIsRename) rename_failed();
+        else if (failed && s_infoLabel) lv_label_set_text(s_infoLabel, "The tempo was not set: no song is open.");
     }
     if (s_overlay) return;
     uint32_t shape = 0, total = 0;
@@ -495,20 +525,90 @@ void edit_selected(F edit)
     rebuild_timeline();
 }
 
-void left_cb(lv_event_t*)
+/// MOVE/DUP/DEL lit, the encoder on them: what a click on a block opens.
+void paint_tools()
 {
-    edit_selected([](crosspad::AudioSong&, crosspad::SongClip& c) {
-        if (c.bar) --c.bar;
-        return c;
-    });
+    for (int t = 0; t < kBlockTools; ++t) {
+        if (!s_tools[t]) continue;
+        lv_obj_set_style_text_color(lv_obj_get_child(s_tools[t], 0), s_toolMode ? kText : kDim, 0);
+        lv_obj_set_style_border_width(s_tools[t], s_toolMode ? 1 : 0, 0);
+        lv_obj_set_style_border_color(s_tools[t], kAccent, 0);
+    }
 }
 
-void right_cb(lv_event_t*)
+void enter_tools()
 {
-    edit_selected([](crosspad::AudioSong&, crosspad::SongClip& c) {
-        ++c.bar;
+    auto* se = engine();
+    if (!se) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& cs = se->song().tracks[s_selTrack].clips;
+        if (s_selIndex < 0 || s_selIndex >= (int)cs.size()) return;
+    }
+    s_toolMode = true;
+    paint_tools();
+#ifdef ARR_USE_ENCODER
+    if (s_toolGroup && indev_encoderTop) {
+        lv_group_set_editing(s_toolGroup, false);
+        lv_indev_set_group(indev_encoderTop, s_toolGroup);
+        lv_group_focus_obj(s_tools[0]);
+    }
+#endif
+}
+
+/// Back up to the blocks, on the one selected.
+void leave_tools()
+{
+    if (!s_toolMode) return;
+    s_toolMode = false;
+    paint_tools();
+#ifdef ARR_USE_ENCODER
+    if (s_toolGroup) lv_group_set_editing(s_toolGroup, false);
+    if (s_encGroup && indev_encoderTop) {
+        lv_indev_set_group(indev_encoderTop, s_encGroup);
+        for (int i = 0; i < s_blockCount; ++i) {
+            if (s_blocks[i].track == s_selTrack && s_blocks[i].index == s_selIndex) {
+                lv_group_focus_obj(s_blocks[i].obj);
+                break;
+            }
+        }
+    }
+#endif
+}
+
+void scroll_to_selected()
+{
+    for (int i = 0; i < s_blockCount; ++i) {
+        if (s_blocks[i].track == s_selTrack && s_blocks[i].index == s_selIndex) {
+            lv_obj_scroll_to_view(s_blocks[i].obj, LV_ANIM_OFF);
+            break;
+        }
+    }
+}
+
+/// MOVE is turned: a bar per detent. Its click (the encoder's second) ends
+/// the move; a tap puts it in the same turning mode for the encoder.
+void move_cb(lv_event_t* e)
+{
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = lv_obj_get_group(b);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if (g && lv_group_get_editing(g)) { leave_tools(); return; }
+        enter_tools();
+#ifdef ARR_USE_ENCODER
+        if (s_toolGroup && s_toolMode) lv_group_set_editing(s_toolGroup, true);
+#endif
+        return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    const int step = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+    if (!step) return;
+    edit_selected([step](crosspad::AudioSong&, crosspad::SongClip& c) {
+        if (step < 0 && c.bar) --c.bar;
+        else if (step > 0)     ++c.bar;
         return c;
     });
+    scroll_to_selected();
 }
 
 /// A copy straight after the block, which is how a part is repeated.
@@ -520,6 +620,8 @@ void dup_cb(lv_event_t*)
         song.tracks[s_selTrack].clips.push_back(copy);
         return copy;
     });
+    leave_tools();
+    scroll_to_selected();
 }
 
 void del_cb(lv_event_t*)
@@ -535,6 +637,14 @@ void del_cb(lv_event_t*)
     }
     se->commit();
     rebuild_timeline();
+    leave_tools();
+}
+
+bool back_handler(lv_obj_t*)
+{
+    if (!s_toolMode) return false;
+    leave_tools();
+    return true;
 }
 
 void head_cb(lv_event_t* e)
@@ -710,6 +820,146 @@ void project_pick_cb(lv_event_t* e)
 
 void cancel_cb(lv_event_t*) { close_overlay(); }
 
+// ── the open song's settings: tempo and name ───────────────────────────────
+
+int32_t   s_editBpm = 120;          // the tempo being dialled, applied on the click that ends it
+lv_obj_t* s_tempoItem = nullptr;
+
+void show_tempo()
+{
+    if (!s_tempoItem) return;
+    lv_label_set_text_fmt(lv_obj_get_child(s_tempoItem, 0), "Tempo  %03d BPM", (int)s_editBpm);
+}
+
+void song_edit_cb(lv_event_t*);
+
+/// Turned to dial, clicked to set: a tempo change resizes every block (see
+/// ISongEngine::requestTempo), so it is made once, not per detent.
+void tempo_cb(lv_event_t* e)
+{
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = lv_obj_get_group(b);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if (g && lv_group_get_editing(g)) {
+            lv_group_set_editing(g, false);
+            auto* se = engine();
+            if (se && se->requestTempo((float)s_editBpm)) {
+                s_editing = true;
+                s_editIsRename = false;
+                lv_label_set_text(lv_obj_get_child(b, 0), "Setting the tempo ...");
+            }
+        } else if (g) {
+            lv_group_focus_obj(b);
+            lv_group_set_editing(g, true);
+        }
+        return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    const int step = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+    if (!step) return;
+    s_editBpm = std::max<int32_t>(40, std::min<int32_t>(300, s_editBpm + step));
+    show_tempo();
+}
+
+lv_obj_t* s_nameArea = nullptr;
+
+void rename_failed()
+{
+    if (s_overlay) return;
+    overlay_list("That name is taken, or not one a folder can have.");
+    overlay_item(LV_SYMBOL_OK " OK", [](lv_event_t*) { close_overlay(); }, nullptr, true);
+}
+
+void rename_done_cb(lv_event_t* e)
+{
+    const bool ok = lv_event_get_code(e) == LV_EVENT_READY;
+    std::string name = s_nameArea ? lv_textarea_get_text(s_nameArea) : "";
+    close_overlay();
+    s_nameArea = nullptr;
+    auto* se = engine();
+    if (!ok || !se || name.empty()) return;
+    if (!se->requestRename(name)) { rename_failed(); return; }
+    s_editing = true;
+    s_editIsRename = true;
+    if (s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Renaming to %s ...", name.c_str());
+}
+
+void rename_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se) return;
+    std::string name;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        name = se->song().name;
+    }
+    close_overlay();
+    overlay_list("Rename song");
+    lv_obj_set_style_pad_row(s_overlay, 2, 0);
+    s_nameArea = lv_textarea_create(s_overlay);
+    lv_textarea_set_one_line(s_nameArea, true);
+    lv_textarea_set_max_length(s_nameArea, 40);
+    lv_textarea_set_text(s_nameArea, name.c_str());
+    lv_obj_set_width(s_nameArea, LV_PCT(100));
+    lv_obj_t* kb = lv_keyboard_create(s_overlay);
+    lv_obj_set_size(kb, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_grow(kb, 1);
+    lv_keyboard_set_textarea(kb, s_nameArea);
+    lv_obj_add_event_cb(kb, rename_done_cb, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(kb, rename_done_cb, LV_EVENT_CANCEL, nullptr);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) {
+        lv_group_add_obj(s_overlayGroup, kb);
+        lv_group_focus_obj(kb);
+        lv_group_set_editing(s_overlayGroup, true);
+    }
+#endif
+}
+
+void song_edit_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se) return;
+    std::string title = "Song";
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        s_editBpm = song.bpm > 0.0f ? (int32_t)lroundf(song.bpm) : 120;
+        title = "Song: " + song.name;
+    }
+    close_overlay();
+    overlay_list(title.c_str());
+    /* The tempo row is turned like MOVE: click, turn, click. */
+    s_tempoItem = lv_CreateEditableButton(s_overlay);
+    lv_obj_set_size(s_tempoItem, LV_PCT(100), 24);
+    lv_obj_set_style_radius(s_tempoItem, 6, 0);
+    lv_obj_set_style_shadow_width(s_tempoItem, 0, 0);
+    lv_obj_set_style_bg_color(s_tempoItem, kPanel, 0);
+    lv_obj_set_style_bg_color(s_tempoItem, kAccent, LV_STATE_EDITED);
+    lv_obj_set_style_outline_color(s_tempoItem, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(s_tempoItem, 2, LV_STATE_FOCUS_KEY);
+    lv_obj_t* l = lv_label_create(s_tempoItem);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(l, kText, 0);
+    lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_KEY, nullptr);
+    lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_CLICKED, nullptr);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s_tempoItem);
+#endif
+    show_tempo();
+    lv_obj_t* hint = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, kDim, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_text(hint, "Click, turn, click to set. Clips keep their speed: each block is resized to "
+                            "what its file lasts at the new tempo. SYNC plays the sequencer at this tempo.");
+    overlay_item(LV_SYMBOL_EDIT " Rename", rename_cb, nullptr);
+    overlay_item(LV_SYMBOL_OK " Done", [](lv_event_t*) { close_overlay(); s_tempoItem = nullptr; }, nullptr, true);
+}
+
 void request_list(Pending what, const char* title)
 {
     auto* se = engine();
@@ -728,6 +978,15 @@ void fill_projects()
 {
     auto* se = engine();
     s_projects = se->projects();
+    std::string current;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        current = se->song().name;
+    }
+    if (!current.empty()) {
+        const std::string edit = std::string(LV_SYMBOL_SETTINGS " Edit \"") + current + "\"  (tempo, name)";
+        overlay_item(edit.c_str(), song_edit_cb, nullptr);
+    }
     overlay_item(LV_SYMBOL_PLUS " New song", project_pick_cb, (void*)(intptr_t)-1, true);
     for (size_t i = 0; i < s_projects.size() && i < 24; ++i) {
         overlay_item(s_projects[i].c_str(), project_pick_cb, (void*)(intptr_t)i);
@@ -937,6 +1196,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_set_style_outline_width(h, 2, LV_STATE_FOCUS_KEY);
         lv_obj_add_event_cb(h, head_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
         lv_obj_t* l = lv_label_create(h);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(l, kText, 0);
         lv_label_set_text_fmt(l, "%d", t + 1);
         lv_obj_center(l);
@@ -964,14 +1224,39 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     // -- tools on the selected block --
     lv_obj_t* tools = make_row(s_root, 24);
     lv_obj_set_style_pad_column(tools, 3, 0);
-    s_tools[0] = make_button(tools, 30, LV_SYMBOL_LEFT, left_cb);
-    s_tools[1] = make_button(tools, 30, LV_SYMBOL_RIGHT, right_cb);
-    s_tools[2] = make_button(tools, 38, "DUP", dup_cb);
-    s_tools[3] = make_button(tools, 38, "DEL", del_cb);
-    s_tools[4] = make_button(tools, 46, LV_SYMBOL_PLUS " ADD", add_cb);
-    s_tools[5] = make_button(tools, 38, "LEN", length_cb);
-    s_tools[6] = make_button(tools, 34, "Z-", zoom_out_cb);
-    s_tools[7] = make_button(tools, 34, "Z+", zoom_in_cb);
+    s_tools[0] = lv_CreateEditableButton(tools);
+    lv_obj_set_size(s_tools[0], 48, 22);
+    lv_obj_set_style_pad_all(s_tools[0], 0, 0);
+    lv_obj_set_style_radius(s_tools[0], 6, 0);
+    lv_obj_set_style_shadow_width(s_tools[0], 0, 0);
+    lv_obj_set_style_bg_color(s_tools[0], kPanel, 0);
+    lv_obj_set_style_bg_color(s_tools[0], kAccent, LV_STATE_EDITED);
+    lv_obj_set_style_outline_color(s_tools[0], kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(s_tools[0], 2, LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_KEY, nullptr);
+    lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_CLICKED, nullptr);
+    {
+        lv_obj_t* l = lv_label_create(s_tools[0]);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
+        lv_label_set_text(l, LV_SYMBOL_LEFT "MOVE" LV_SYMBOL_RIGHT);
+        lv_obj_center(l);
+    }
+    s_tools[1] = make_button(tools, 38, "DUP", dup_cb);
+    s_tools[2] = make_button(tools, 38, "DEL", del_cb);
+    lv_obj_t* gap = lv_obj_create(tools);
+    lv_obj_remove_style_all(gap);
+    lv_obj_set_size(gap, 6, 1);
+    s_tools[3] = make_button(tools, 46, LV_SYMBOL_PLUS " ADD", add_cb);
+    s_tools[4] = make_button(tools, 38, "LEN", length_cb);
+    s_tools[5] = make_button(tools, 34, "Z-", zoom_out_cb);
+    s_tools[6] = make_button(tools, 34, "Z+", zoom_in_cb);
+#ifdef ARR_USE_ENCODER
+    s_toolGroup = lv_group_create();
+    for (int t = 0; t < kBlockTools; ++t) lv_group_add_obj(s_toolGroup, s_tools[t]);
+#endif
+    s_toolMode = false;
+    paint_tools();
 
     lv_obj_update_layout(s_root);
     s_shape = 0;
@@ -986,6 +1271,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     s_timer = lv_timer_create(tick_cb, kTickMs, nullptr);
 
     if (app) {
+        app->setOnBack(back_handler);
         app->setOnShow([](lv_obj_t*) {
             if (s_timer) lv_timer_resume(s_timer);
 #ifdef ARR_USE_ENCODER
@@ -1012,12 +1298,16 @@ void Arrange_destroy(lv_obj_t* root)
      * engine's, not this screen's. Only the widgets go. */
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
+    if (s_toolGroup) { lv_group_delete(s_toolGroup); s_toolGroup = nullptr; }
 #endif
+    s_toolMode = false;
     s_overlay = nullptr;
     s_loading = nullptr;
     s_pending = Pending::None;
     s_opening = false;
     s_lenLabel = nullptr;
+    s_tempoItem = nullptr;
+    s_nameArea = nullptr;
     for (auto& b : s_blocks) b = Block{};
     for (auto& h : s_heads) h = nullptr;
     for (auto& t : s_tools) t = nullptr;
