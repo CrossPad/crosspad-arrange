@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.21.0",
-    "crosspad-gui": ">=1.12.0"
+    "crosspad-core": ">=1.23.0",
+    "crosspad-gui": ">=1.13.0"
   },
   "changelog": [
+    "0.3.0: a click on a block takes the encoder to MOVE/DUP/DEL (MOVE is turned a bar per detent, the next click comes back; DUP and DEL come back at once; the power button's click too); wider track numbers; the songs list edits the open song's tempo and name, as requests; requires core 1.23 and gui 1.13",
     "0.2.0: project list, clip list and opening a song are requests to the song engine (core 1.21 ISongEngine), filled in when the card answers; a song that cannot be read is left untouched; blocks drawn per track; the selection follows the exact block an edit moved",
     "0.1.0: Generated from the CrossPad app template"
   ]
