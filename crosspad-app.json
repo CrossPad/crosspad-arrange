@@ -1,0 +1,17 @@
+{
+  "name": "Arrange",
+  "id": "arrange",
+  "version": "0.1.0",
+  "description": "Four audio tracks of bounced clips on a timeline",
+  "category": "music",
+  "icon": "arrange.png",
+  "component_path": "components/crosspad-arrange",
+  "platforms": ["esp-idf", "pc"],
+  "requires": {
+    "crosspad-core": ">=0.3.0",
+    "crosspad-gui": ">=0.2.0"
+  },
+  "changelog": [
+    "0.1.0: Generated from the CrossPad app template"
+  ]
+}

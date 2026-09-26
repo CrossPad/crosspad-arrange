@@ -1,0 +1,13 @@
+{
+    "name": "crosspad-arrange",
+    "version": "0.1.0",
+    "description": "Four audio tracks of bounced clips on a timeline",
+    "keywords": ["crosspad", "arrange", "lvgl", "pad"],
+    "dependencies": {
+        "crosspad-core": "*",
+        "crosspad-gui": "*"
+    },
+    "build": {
+        "appLibrary": true
+    }
+}
