@@ -148,6 +148,12 @@ lv_group_t* s_overlayGroup = nullptr;
 lv_group_t* s_toolGroup = nullptr;    // MOVE/DUP/DEL while a block is clicked
 #endif
 bool s_toolMode = false;
+/* MOVE's axis while it is turned: first click along the bars, second across
+ * the tracks, third done. Arrows beside the block show which, and a finger
+ * can tap them. */
+enum class MoveAxis : uint8_t { None, Bars, Tracks };
+MoveAxis  s_moveAxis = MoveAxis::None;
+lv_obj_t* s_moveArrows[4] = {};       // left, right, up, down; children of the timeline
 
 crosspad::ISongEngine* engine()
 {
@@ -223,6 +229,7 @@ void select(int track, int index)
 }
 
 void enter_tools();
+void place_move_arrows();
 
 void block_cb(lv_event_t* e)
 {
@@ -275,6 +282,7 @@ void rebuild_timeline()
 
     lv_obj_clean(s_timeline);
     s_playhead = nullptr;
+    for (auto& a : s_moveArrows) a = nullptr;
     s_blockCount = 0;
 
     const uint32_t end = song.playEnd();
@@ -367,6 +375,8 @@ void rebuild_timeline()
 
     s_playhead = lv_obj_create(s_timeline);
     lv_obj_remove_style_all(s_playhead);
+    /* Arrows (if MOVE is on) go on last, over the blocks; placed below, once
+     * the blocks are sized. */
     lv_obj_set_size(s_playhead, 2, kRulerH + 2 + kTracks * (kLaneH + kLaneGap));
     lv_obj_set_style_bg_color(s_playhead, kHead, 0);
     lv_obj_set_style_bg_opa(s_playhead, LV_OPA_COVER, 0);
@@ -386,6 +396,7 @@ void rebuild_timeline()
     if (s_selIndex >= (int)sel.size()) s_selIndex = (int)sel.size() - 1;
     s_shape = song_shape(song);
     rebuild_group();
+    place_move_arrows();
     select(s_selTrack, s_selIndex);
 }
 
@@ -525,6 +536,61 @@ void edit_selected(F edit)
     rebuild_timeline();
 }
 
+void move_arrow_cb(lv_event_t* e);
+
+/// The arrows around the selected block while MOVE is on: the axis being
+/// turned lit, the other dim, and none where the block cannot go.
+void place_move_arrows()
+{
+    for (auto& a : s_moveArrows) {
+        if (a) lv_obj_delete(a);
+        a = nullptr;
+    }
+    if (s_moveAxis == MoveAxis::None || !s_timeline) return;
+    lv_obj_t* blk = nullptr;
+    for (int i = 0; i < s_blockCount; ++i) {
+        if (s_blocks[i].track == s_selTrack && s_blocks[i].index == s_selIndex) { blk = s_blocks[i].obj; break; }
+    }
+    if (!blk) return;
+    lv_obj_update_layout(blk);
+    const int32_t x = lv_obj_get_x(blk), y = lv_obj_get_y(blk);
+    const int32_t w = lv_obj_get_width(blk), h = lv_obj_get_height(blk);
+    constexpr int32_t kA = 16;
+    uint32_t bar = 0;
+    if (auto* se = engine()) {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& cs = se->song().tracks[s_selTrack].clips;
+        if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) bar = cs[s_selIndex].bar;
+    }
+    struct Spot { int32_t x, y; const char* sym; bool can; bool bars; };
+    const Spot spots[4] = {
+        {x - kA - 1,         y + (h - kA) / 2, LV_SYMBOL_LEFT,  bar > 0,                true},
+        {x + w + 1,          y + (h - kA) / 2, LV_SYMBOL_RIGHT, true,                   true},
+        {x + (w - kA) / 2,   y - kA / 2 - 2,   LV_SYMBOL_UP,    s_selTrack > 0,         false},
+        {x + (w - kA) / 2,   y + h - kA / 2 + 2, LV_SYMBOL_DOWN, s_selTrack < kTracks - 1, false},
+    };
+    for (int d = 0; d < 4; ++d) {
+        if (!spots[d].can) continue;
+        const bool lit = spots[d].bars == (s_moveAxis == MoveAxis::Bars);
+        lv_obj_t* a = lv_button_create(s_timeline);
+        lv_obj_remove_style_all(a);
+        lv_obj_set_size(a, kA, kA);
+        lv_obj_set_pos(a, std::max<int32_t>(0, spots[d].x), std::max<int32_t>(0, spots[d].y));
+        lv_obj_set_style_radius(a, kA / 2, 0);
+        lv_obj_set_style_bg_opa(a, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(a, lit ? kAccent : kPanel, 0);
+        lv_obj_set_style_border_width(a, 1, 0);
+        lv_obj_set_style_border_color(a, lit ? kInk : kDim, 0);
+        lv_obj_add_event_cb(a, move_arrow_cb, LV_EVENT_CLICKED, (void*)(intptr_t)d);
+        lv_obj_t* l = lv_label_create(a);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(l, lit ? kInk : kDim, 0);
+        lv_label_set_text(l, spots[d].sym);
+        lv_obj_center(l);
+        s_moveArrows[d] = a;
+    }
+}
+
 /// MOVE/DUP/DEL lit, the encoder on them: what a click on a block opens.
 void paint_tools()
 {
@@ -557,10 +623,13 @@ void enter_tools()
 }
 
 /// Back up to the blocks, on the one selected.
+void set_move_axis(MoveAxis a);
+
 void leave_tools()
 {
     if (!s_toolMode) return;
     s_toolMode = false;
+    set_move_axis(MoveAxis::None);
     paint_tools();
 #ifdef ARR_USE_ENCODER
     if (s_toolGroup) lv_group_set_editing(s_toolGroup, false);
@@ -586,29 +655,102 @@ void scroll_to_selected()
     }
 }
 
-/// MOVE is turned: a bar per detent. Its click (the encoder's second) ends
-/// the move; a tap puts it in the same turning mode for the encoder.
-void move_cb(lv_event_t* e)
+/// The selected block to the track above (-1) or below (+1), on its bar.
+void move_track(int dir)
 {
-    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    lv_group_t* g = lv_obj_get_group(b);
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-        if (g && lv_group_get_editing(g)) { leave_tools(); return; }
-        enter_tools();
-#ifdef ARR_USE_ENCODER
-        if (s_toolGroup && s_toolMode) lv_group_set_editing(s_toolGroup, true);
-#endif
-        return;
+    auto* se = engine();
+    const int to = s_selTrack + dir;
+    if (!se || to < 0 || to >= kTracks) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& from = se->song().tracks[s_selTrack].clips;
+        if (s_selIndex < 0 || s_selIndex >= (int)from.size()) return;
+        const crosspad::SongClip c = from[s_selIndex];
+        from.erase(from.begin() + s_selIndex);
+        auto& dst = se->song().tracks[to].clips;
+        auto pos = std::upper_bound(dst.begin(), dst.end(), c,
+            [](const crosspad::SongClip& a, const crosspad::SongClip& b) { return a.bar < b.bar; });
+        s_selIndex = (int)(pos - dst.begin());
+        dst.insert(pos, c);
+        s_selTrack = to;
     }
-    const uint32_t key = lv_event_get_key(e);
-    const int step = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
-    if (!step) return;
+    se->commit();
+    rebuild_timeline();
+    select(s_selTrack, s_selIndex);
+}
+
+void move_bars(int step)
+{
     edit_selected([step](crosspad::AudioSong&, crosspad::SongClip& c) {
         if (step < 0 && c.bar) --c.bar;
         else if (step > 0)     ++c.bar;
         return c;
     });
+}
+
+void set_move_axis(MoveAxis a)
+{
+    s_moveAxis = a;
+    if (s_tools[0]) {
+        lv_label_set_text(lv_obj_get_child(s_tools[0], 0),
+                          a == MoveAxis::Bars   ? LV_SYMBOL_LEFT " BAR " LV_SYMBOL_RIGHT :
+                          a == MoveAxis::Tracks ? LV_SYMBOL_UP " TRK " LV_SYMBOL_DOWN : "MOVE");
+    }
+    place_move_arrows();
+}
+
+/// MOVE is turned: the first click along the bars (a bar per detent), the
+/// next across the tracks (a track per detent), the third ends it and goes
+/// back to the blocks. A tap starts it for the encoder too.
+void move_cb(lv_event_t* e)
+{
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = lv_obj_get_group(b);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_FOCUSED) {
+        /* The encoder's first click puts MOVE in edit mode; LVGL tells it with
+         * FOCUSED, not CLICKED. */
+        const bool editing = g && lv_group_get_editing(g);
+        if (editing && s_moveAxis == MoveAxis::None) set_move_axis(MoveAxis::Bars);
+        else if (!editing && s_moveAxis != MoveAxis::None) set_move_axis(MoveAxis::None);
+        return;
+    }
+    if (code == LV_EVENT_CLICKED) {
+        if (g && lv_group_get_editing(g)) {
+            if (s_moveAxis == MoveAxis::Bars) set_move_axis(MoveAxis::Tracks);
+            else                              leave_tools();
+            return;
+        }
+        enter_tools();
+#ifdef ARR_USE_ENCODER
+        if (s_toolGroup && s_toolMode) lv_group_set_editing(s_toolGroup, true);
+#endif
+        if (s_moveAxis == MoveAxis::None) set_move_axis(MoveAxis::Bars);
+        return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    const int step = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+    if (!step) return;
+    /* Turning right goes down the lanes, the way a list scrolls. */
+    if (s_moveAxis == MoveAxis::Tracks) move_track(step);
+    else                                move_bars(step);
     scroll_to_selected();
+}
+
+/// A tapped arrow: moved on the next turn of the LVGL loop, since the move
+/// rebuilds the timeline and with it the arrow being clicked.
+void move_arrow_cb(lv_event_t* e)
+{
+    const int d = (int)(intptr_t)lv_event_get_user_data(e);
+    lv_async_call([](void* p) {
+        const int dir = (int)(intptr_t)p;
+        s_moveAxis = dir < 2 ? MoveAxis::Bars : MoveAxis::Tracks;
+        if (dir == 0) move_bars(-1);
+        else if (dir == 1) move_bars(+1);
+        else move_track(dir == 2 ? -1 : +1);
+        set_move_axis(s_moveAxis);
+        scroll_to_selected();
+    }, (void*)(intptr_t)d);
 }
 
 /// A copy straight after the block, which is how a part is repeated.
@@ -1235,11 +1377,12 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_outline_width(s_tools[0], 2, LV_STATE_FOCUS_KEY);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_KEY, nullptr);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_FOCUSED, nullptr);
     {
         lv_obj_t* l = lv_label_create(s_tools[0]);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
-        lv_label_set_text(l, LV_SYMBOL_LEFT "MOVE" LV_SYMBOL_RIGHT);
+        lv_label_set_text(l, "MOVE");
         lv_obj_center(l);
     }
     s_tools[1] = make_button(tools, 38, "DUP", dup_cb);
@@ -1301,6 +1444,8 @@ void Arrange_destroy(lv_obj_t* root)
     if (s_toolGroup) { lv_group_delete(s_toolGroup); s_toolGroup = nullptr; }
 #endif
     s_toolMode = false;
+    s_moveAxis = MoveAxis::None;
+    for (auto& a : s_moveArrows) a = nullptr;
     s_overlay = nullptr;
     s_loading = nullptr;
     s_pending = Pending::None;
