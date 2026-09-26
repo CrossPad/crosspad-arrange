@@ -1,17 +1,21 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
   "component_path": "components/crosspad-arrange",
-  "platforms": ["esp-idf", "pc"],
+  "platforms": [
+    "esp-idf",
+    "pc"
+  ],
   "requires": {
-    "crosspad-core": ">=0.3.0",
-    "crosspad-gui": ">=0.2.0"
+    "crosspad-core": ">=1.21.0",
+    "crosspad-gui": ">=1.12.0"
   },
   "changelog": [
+    "0.2.0: project list, clip list and opening a song are requests to the song engine (core 1.21 ISongEngine), filled in when the card answers; a song that cannot be read is left untouched; blocks drawn per track; the selection follows the exact block an edit moved",
     "0.1.0: Generated from the CrossPad app template"
   ]
 }

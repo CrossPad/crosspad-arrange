@@ -67,6 +67,8 @@ constexpr int32_t  kLaneGap  = 2;
 constexpr int32_t  kHeadW    = 24;
 constexpr uint32_t kTickMs   = 50;
 constexpr int      kMaxBlocks = 64;
+/// Drawn blocks per track: a long track must not use up the ones the others need.
+constexpr int      kMaxBlocksPerTrack = kMaxBlocks / kTracks;
 
 const lv_color_t kBg     = lv_color_hex(0x16181B);
 const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -117,6 +119,15 @@ int32_t  s_pxPerBar = kZoomPx[2];
 int      s_selTrack = 0;
 int      s_selIndex = -1;
 uint32_t s_shape = 0;
+
+/* The card is read on the platform's side; an overlay opens at once with a
+ * line saying so and is filled when the list comes back. */
+enum class Pending : uint8_t { None, Projects, Clips };
+Pending   s_pending = Pending::None;
+uint32_t  s_pendingGen = 0;
+lv_obj_t* s_loading = nullptr;
+/* A project asked for and not open yet: the timeline waits for it. */
+bool      s_opening = false;
 
 #ifdef ARR_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
@@ -288,7 +299,7 @@ void rebuild_timeline()
         lv_obj_remove_flag(lane, LV_OBJ_FLAG_CLICKABLE);
 
         const auto& cs = song.tracks[tr].clips;
-        for (int i = 0; i < (int)cs.size() && s_blockCount < kMaxBlocks; ++i) {
+        for (int i = 0; i < (int)cs.size() && i < kMaxBlocksPerTrack && s_blockCount < kMaxBlocks; ++i) {
             const auto& c = cs[i];
             lv_obj_t* o = lv_obj_create(s_timeline);
             lv_obj_remove_style_all(o);
@@ -399,10 +410,30 @@ void sync_transport()
     set_ink(lv_obj_get_child(s_syncBtn, 0), sync ? kInk : kDim);
 }
 
+void fill_clips();
+void fill_projects();
+
 void tick_cb(lv_timer_t*)
 {
     auto* se = engine();
-    if (!se || s_overlay) return;
+    if (!se) return;
+    if (s_pending != Pending::None && se->listGeneration() != s_pendingGen) {
+        const Pending what = s_pending;
+        s_pending = Pending::None;
+        if (s_loading) { lv_obj_delete(s_loading); s_loading = nullptr; }
+        if (what == Pending::Projects) fill_projects();
+        else                           fill_clips();
+    }
+    if (s_opening) {
+        const auto st = se->openState();
+        if (st == crosspad::SongOpState::Busy) return;
+        s_opening = false;
+        rebuild_timeline();
+        if (st == crosspad::SongOpState::Failed && s_infoLabel) {
+            lv_label_set_text(s_infoLabel, "That song could not be read; it is left untouched on the card.");
+        }
+    }
+    if (s_overlay) return;
     uint32_t shape = 0, total = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -437,7 +468,10 @@ void tick_cb(lv_timer_t*)
 // ── editing ────────────────────────────────────────────────────────────────
 
 /// Run @p edit on the selected block under the song lock, commit, and keep
-/// the selection on that block wherever the edit sorted it to.
+/// the selection on the block the edit returned -- the moved one, or the copy
+/// a duplicate appended -- wherever it now sorts. Moved into place by hand
+/// rather than found again afterwards: two blocks of one clip on one bar
+/// look alike, and a search can land on the other one.
 template <typename F>
 void edit_selected(F edit)
 {
@@ -448,11 +482,14 @@ void edit_selected(F edit)
         auto& song = se->song();
         auto& cs = song.tracks[s_selTrack].clips;
         if (s_selIndex < 0 || s_selIndex >= (int)cs.size()) return;
-        crosspad::SongClip keep = edit(song, cs[s_selIndex]);
-        song.sortTrack(s_selTrack);
-        for (int i = 0; i < (int)cs.size(); ++i) {
-            if (cs[i].bar == keep.bar && cs[i].file == keep.file) { s_selIndex = i; break; }
-        }
+        const size_t before = cs.size();
+        const crosspad::SongClip keep = edit(song, cs[s_selIndex]);
+        const size_t at = cs.size() > before ? cs.size() - 1 : (size_t)s_selIndex;
+        cs.erase(cs.begin() + at);
+        auto pos = std::upper_bound(cs.begin(), cs.end(), keep,
+            [](const crosspad::SongClip& a, const crosspad::SongClip& b) { return a.bar < b.bar; });
+        s_selIndex = (int)(pos - cs.begin());
+        cs.insert(pos, keep);
     }
     se->commit();
     rebuild_timeline();
@@ -589,6 +626,8 @@ void back_cb(lv_event_t* e)
 
 void close_overlay()
 {
+    s_pending = Pending::None;
+    s_loading = nullptr;
     if (!s_overlay) return;
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
@@ -662,25 +701,43 @@ void project_pick_cb(lv_event_t* e)
         name = s_projects[i];
     }
     close_overlay();
-    if (se && !name.empty()) se->openProject(name);
+    if (!se || name.empty()) return;
     s_selTrack = 0;
     s_selIndex = -1;
-    rebuild_timeline();
+    s_opening = se->requestOpen(name);
+    if (s_opening && s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Opening %s ...", name.c_str());
 }
 
 void cancel_cb(lv_event_t*) { close_overlay(); }
 
-void project_cb(lv_event_t*)
+void request_list(Pending what, const char* title)
 {
     auto* se = engine();
     if (!se || s_overlay) return;
-    s_projects = se->listProjects();
-    overlay_list("Songs");
+    s_pendingGen = se->listGeneration();
+    const bool asked = what == Pending::Projects ? se->requestProjects() : se->requestClips();
+    overlay_list(title);
+    s_loading = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(s_loading, kDim, 0);
+    lv_label_set_text(s_loading, asked ? "Reading the card ..." : "The card is busy, try again.");
+    s_pending = asked ? what : Pending::None;
+    if (!asked) overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
+void fill_projects()
+{
+    auto* se = engine();
+    s_projects = se->projects();
     overlay_item(LV_SYMBOL_PLUS " New song", project_pick_cb, (void*)(intptr_t)-1, true);
     for (size_t i = 0; i < s_projects.size() && i < 24; ++i) {
         overlay_item(s_projects[i].c_str(), project_pick_cb, (void*)(intptr_t)i);
     }
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
+void project_cb(lv_event_t*)
+{
+    request_list(Pending::Projects, "Songs");
 }
 
 /// A library clip onto the selected track, after its last block.
@@ -705,12 +762,15 @@ void library_pick_cb(lv_event_t* e)
 
 void add_cb(lv_event_t*)
 {
-    auto* se = engine();
-    if (!se || s_overlay) return;
-    s_library = se->listClips();
     char title[48];
     lv_snprintf(title, sizeof(title), "Add to track %d", s_selTrack + 1);
-    overlay_list(title);
+    request_list(Pending::Clips, title);
+}
+
+void fill_clips()
+{
+    auto* se = engine();
+    s_library = se->clips();
     for (size_t i = 0; i < s_library.size() && i < 32; ++i) {
         char row[64];
         lv_snprintf(row, sizeof(row), "%s  (%u bars)", short_name(s_library[i].file).c_str(),
@@ -917,6 +977,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     s_shape = 0;
     rebuild_timeline();
     sync_transport();
+    if (!engine()) lv_label_set_text(s_infoLabel, "No song engine on this platform.");
 
 #ifdef ARR_USE_ENCODER
     if (s_encGroup) lv_group_focus_obj(s_playBtn);
@@ -953,6 +1014,9 @@ void Arrange_destroy(lv_obj_t* root)
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
 #endif
     s_overlay = nullptr;
+    s_loading = nullptr;
+    s_pending = Pending::None;
+    s_opening = false;
     s_lenLabel = nullptr;
     for (auto& b : s_blocks) b = Block{};
     for (auto& h : s_heads) h = nullptr;
