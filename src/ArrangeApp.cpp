@@ -850,8 +850,17 @@ void del_cb(lv_event_t*)
 
 void leave_region_edit();
 
+void close_overlay();
+
+/// The power button's click goes up one level: a window, then a region or
+/// a block being edited, then out of the app.
 bool back_handler(lv_obj_t*)
 {
+    if (s_overlay) {
+        for (auto& t : s_mergeToggles) t = nullptr;
+        close_overlay();
+        return true;
+    }
     if (s_regionEdit != RegionEdit::None) { leave_region_edit(); return true; }
     if (!s_toolMode) return false;
     leave_tools();
