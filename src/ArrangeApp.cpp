@@ -883,7 +883,8 @@ void close_overlay()
     if (!s_overlay) return;
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
-    if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
+    lv_group_delete_deferred(s_overlayGroup);     // the click that closed it is still being read
+    s_overlayGroup = nullptr;
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
