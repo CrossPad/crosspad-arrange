@@ -13,9 +13,13 @@
  *          block
  *   lanes  a header per track (tap: mute), the timeline beside them
  *   tools  MOVE, DUP and DEL act on the selected block; ADD a clip from the
- *          project's library to the selected track, LEN (how many bars the
- *          song plays and loops over: set, or up to its last block) and zoom
- *          out/in on the timeline
+ *          project's library to the selected track, EDIT, and zoom out/in on
+ *          the timeline
+ *   EDIT   the loop region (L and R, turned like MOVE; with LOOP on the song
+ *          goes round it, and PLAY starts at it), copy / paste / duplicate x2
+ *          of the region across every track -- inserted, so nothing after it
+ *          is written over -- merging tracks, or all of them, into one clip
+ *          over the region or the whole song, and the song's length
  *
  * The encoder walks the blocks; a click on one selects it and takes the
  * encoder down to MOVE/DUP/DEL. DUP and DEL act and bring it back to the
@@ -146,6 +150,7 @@ lv_group_t* s_encGroup = nullptr;
 lv_group_t* s_prevEncGroup = nullptr;
 lv_group_t* s_overlayGroup = nullptr;
 lv_group_t* s_toolGroup = nullptr;    // MOVE/DUP/DEL while a block is clicked
+lv_group_t* s_regionGroup = nullptr;  // the region handle while L or R is turned
 #endif
 bool s_toolMode = false;
 /* MOVE's axis while it is turned: first click along the bars, second across
@@ -154,6 +159,23 @@ bool s_toolMode = false;
 enum class MoveAxis : uint8_t { None, Bars, Tracks };
 MoveAxis  s_moveAxis = MoveAxis::None;
 lv_obj_t* s_moveArrows[4] = {};       // left, right, up, down; children of the timeline
+
+/* The loop region moved with the encoder: first its start (L), then its end
+ * (R). A hidden editable handle in a group of its own takes the turns. */
+enum class RegionEdit : uint8_t { None, Start, End };
+RegionEdit s_regionEdit = RegionEdit::None;
+lv_obj_t*  s_regionHandle = nullptr;
+
+/* Copy region: the blocks of every track that start inside it, by track and
+ * by bar from its start. */
+struct Copied { int track; uint32_t rel; crosspad::SongClip clip; };
+std::vector<Copied> s_clipboard;
+uint32_t  s_clipboardBars = 0;
+
+/* A merge the platform is doing on the card, and the tracks picked for one. */
+bool      s_merging = false;
+uint8_t   s_mergeMask = 0x0F;
+lv_obj_t* s_mergeToggles[kTracks] = {};
 
 crosspad::ISongEngine* engine()
 {
@@ -168,6 +190,9 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     auto mix = [&](uint32_t v) { h = (h ^ v) * 16777619u; };
     for (char c : s.dir) mix((uint8_t)c);
     mix(s.length);
+    mix(s.loopStart);
+    mix(s.loopEnd);
+    mix(s.loop);
     for (int t = 0; t < kTracks; ++t) {
         mix(0xABCDu + t);
         mix(s.tracks[t].muted);
@@ -203,6 +228,13 @@ void update_info()
     if (!se || !s_infoLabel) return;
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     const auto& song = se->song();
+    if (s_regionEdit != RegionEdit::None) {
+        lv_label_set_text_fmt(s_infoLabel, "Loop region: bars %u - %u   |   turn to move %s, click for %s",
+                              (unsigned)(song.loopStart + 1), (unsigned)song.loopEnd,
+                              s_regionEdit == RegionEdit::Start ? "L" : "R",
+                              s_regionEdit == RegionEdit::Start ? "R" : "done");
+        return;
+    }
     const auto& cs = song.tracks[s_selTrack].clips;
     if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) {
         const auto& c = cs[s_selIndex];
@@ -290,7 +322,7 @@ void rebuild_timeline()
      * block out -- and at least a screenful, so a short song zoomed out does
      * not leave the lanes half drawn. */
     const int32_t view = lv_obj_get_content_width(s_timeline);
-    uint32_t bars = std::max(song.songEnd(), end) + 8;
+    uint32_t bars = std::max({song.songEnd(), end, song.loopEnd}) + 8;
     bars = std::max<uint32_t>(bars, (uint32_t)(view / s_pxPerBar) + 1);
     /* A tick per bar while they are far enough apart, else per 4; a number
      * wherever there is room for one, on a bar that starts a 4-bar phrase. */
@@ -371,6 +403,27 @@ void rebuild_timeline()
         lv_obj_set_style_bg_color(line, song.length ? kAccent : kDim, 0);
         lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
         lv_obj_remove_flag(line, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    /* The loop region: a band on the ruler, bright while the song loops on
+     * it, faint over the lanes, and a line at each end -- the one being
+     * turned lit. */
+    if (song.hasRegion()) {
+        const int32_t h = kRulerH + 2 + kTracks * (kLaneH + kLaneGap);
+        const int32_t x1 = (int32_t)song.loopStart * s_pxPerBar, x2 = (int32_t)song.loopEnd * s_pxPerBar;
+        auto band = [](int32_t x, int32_t y, int32_t w, int32_t hh, lv_color_t c, lv_opa_t opa) {
+            lv_obj_t* o = lv_obj_create(s_timeline);
+            lv_obj_remove_style_all(o);
+            lv_obj_set_pos(o, x, y);
+            lv_obj_set_size(o, w, hh);
+            lv_obj_set_style_bg_color(o, c, 0);
+            lv_obj_set_style_bg_opa(o, opa, 0);
+            lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+        };
+        band(x1, kRulerH + 2, x2 - x1, h - kRulerH - 2, kAccent, LV_OPA_10);
+        band(x1, 0, x2 - x1, kRulerH, kAccent, song.loop ? LV_OPA_70 : LV_OPA_30);
+        band(x1 - 1, 0, 2, h, s_regionEdit == RegionEdit::Start ? kHead : kAccent, LV_OPA_COVER);
+        band(x2 - 1, 0, 2, h, s_regionEdit == RegionEdit::End ? kHead : kAccent, LV_OPA_COVER);
     }
 
     s_playhead = lv_obj_create(s_timeline);
@@ -463,6 +516,19 @@ void tick_cb(lv_timer_t*)
         rebuild_timeline();
         if (st == crosspad::SongOpState::Failed && s_infoLabel) {
             lv_label_set_text(s_infoLabel, "That song could not be read; it is left untouched on the card.");
+        }
+    }
+    if (s_merging) {
+        char buf[48];
+        if (se->editState() == crosspad::SongOpState::Busy) {
+            std::snprintf(buf, sizeof(buf), "Merging ... %u%%", (unsigned)se->editProgress());
+            set_text(s_infoLabel, buf);
+        } else {
+            s_merging = false;
+            const bool ok = se->editState() == crosspad::SongOpState::Ready;
+            rebuild_timeline();
+            update_info();
+            if (!ok) set_text(s_infoLabel, "Not merged: no card, nothing audible on those tracks, or the card is full.");
         }
     }
     if (s_editing && se->editState() != crosspad::SongOpState::Busy) {
@@ -782,8 +848,11 @@ void del_cb(lv_event_t*)
     leave_tools();
 }
 
+void leave_region_edit();
+
 bool back_handler(lv_obj_t*)
 {
+    if (s_regionEdit != RegionEdit::None) { leave_region_edit(); return true; }
     if (!s_toolMode) return false;
     leave_tools();
     return true;
@@ -841,9 +910,12 @@ void play_cb(lv_event_t*)
     if (se->playing()) { se->stop(); sync_transport(); return; }
     uint32_t from = 0;
     {
+        /* Looping a region: from its start, the place being worked on. */
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& cs = se->song().tracks[s_selTrack].clips;
-        if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) from = cs[s_selIndex].bar;
+        const auto& song = se->song();
+        const auto& cs = song.tracks[s_selTrack].clips;
+        if (song.loop && song.hasRegion())                  from = song.loopStart;
+        else if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) from = cs[s_selIndex].bar;
     }
     se->play(from);
     sync_transport();
@@ -1246,6 +1318,326 @@ void length_cb(lv_event_t*)
     overlay_item(LV_SYMBOL_OK " Done", length_done_cb, nullptr, true);
 }
 
+// ── the loop region ────────────────────────────────────────────────────────
+
+void region_changed()
+{
+    if (auto* se = engine()) se->commit();
+    rebuild_timeline();
+    update_info();
+}
+
+/// The handle's turns move L, then R, a bar per detent; its click goes from
+/// L to R and from R back to the blocks.
+void region_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se) return;
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        if (s_regionEdit == RegionEdit::Start) { s_regionEdit = RegionEdit::End; rebuild_timeline(); update_info(); }
+        else leave_region_edit();
+        return;
+    }
+    if (code != LV_EVENT_KEY) return;
+    const uint32_t key = lv_event_get_key(e);
+    const int d = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+    if (!d) return;
+    uint32_t at = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        if (s_regionEdit == RegionEdit::Start) {
+            const int64_t v = std::max<int64_t>(0, std::min<int64_t>((int64_t)song.loopEnd - 1, (int64_t)song.loopStart + d));
+            song.loopStart = (uint32_t)v;
+            at = song.loopStart;
+        } else {
+            const int64_t v = std::max<int64_t>((int64_t)song.loopStart + 1, std::min<int64_t>(kMaxLength, (int64_t)song.loopEnd + d));
+            song.loopEnd = (uint32_t)v;
+            at = song.loopEnd;
+        }
+    }
+    region_changed();
+    /* The end being moved stays on screen. */
+    const int32_t x = (int32_t)at * s_pxPerBar;
+    const int32_t view = lv_obj_get_content_width(s_timeline);
+    const int32_t left = lv_obj_get_scroll_x(s_timeline);
+    if (x < left + 10 || x > left + view - 10) lv_obj_scroll_to_x(s_timeline, x > view / 2 ? x - view / 2 : 0, LV_ANIM_OFF);
+}
+
+/// Into turning the region, from where it is -- or, with none yet, four
+/// bars from the selected block (or the top).
+void enter_region_edit()
+{
+    auto* se = engine();
+    if (!se) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        if (!song.hasRegion()) {
+            const auto& cs = song.tracks[s_selTrack].clips;
+            song.loopStart = s_selIndex >= 0 && s_selIndex < (int)cs.size() ? cs[s_selIndex].bar : 0;
+            song.loopEnd = song.loopStart + 4;
+        }
+    }
+    s_regionEdit = RegionEdit::Start;
+    region_changed();
+#ifdef ARR_USE_ENCODER
+    if (s_regionGroup && indev_encoderTop) {
+        lv_indev_set_group(indev_encoderTop, s_regionGroup);
+        lv_group_focus_obj(s_regionHandle);
+        lv_group_set_editing(s_regionGroup, true);
+    }
+#endif
+}
+
+void leave_region_edit()
+{
+    if (s_regionEdit == RegionEdit::None) return;
+    s_regionEdit = RegionEdit::None;
+#ifdef ARR_USE_ENCODER
+    if (s_regionGroup) lv_group_set_editing(s_regionGroup, false);
+    if (s_encGroup && indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_encGroup);
+#endif
+    rebuild_timeline();
+    update_info();
+}
+
+/// Every block of every track that starts in [from, to), moved @p by bars
+/// on -- time inserted, so nothing after the point is written over.
+void shift_from(crosspad::AudioSong& song, uint32_t at, uint32_t by)
+{
+    for (auto& tr : song.tracks) for (auto& c : tr.clips) if (c.bar >= at) c.bar += by;
+    if (song.length && song.length > at) song.length += by;
+}
+
+void copy_region(crosspad::AudioSong& song, std::vector<Copied>& out)
+{
+    out.clear();
+    for (int t = 0; t < kTracks; ++t) {
+        for (const auto& c : song.tracks[t].clips) {
+            if (c.bar >= song.loopStart && c.bar < song.loopEnd) out.push_back(Copied{t, c.bar - song.loopStart, c});
+        }
+    }
+}
+
+void paste_at(crosspad::AudioSong& song, const std::vector<Copied>& in, uint32_t at)
+{
+    for (const auto& k : in) {
+        crosspad::SongClip c = k.clip;
+        c.bar = at + k.rel;
+        song.tracks[k.track].clips.push_back(c);
+    }
+    for (int t = 0; t < kTracks; ++t) song.sortTrack(t);
+}
+
+template <typename F>
+void region_edit(F fn)
+{
+    auto* se = engine();
+    if (!se) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        fn(se->song());
+    }
+    s_selIndex = -1;
+    close_overlay();
+    region_changed();
+}
+
+void region_copy_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        copy_region(song, s_clipboard);
+        s_clipboardBars = song.loopEnd - song.loopStart;
+    });
+}
+
+/// The copied bars in at the region's start; what was there moves on.
+void region_paste_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        if (s_clipboard.empty() || !s_clipboardBars) return;
+        shift_from(song, song.loopStart, s_clipboardBars);
+        paste_at(song, s_clipboard, song.loopStart);
+        song.loopEnd = song.loopStart + s_clipboardBars;
+    });
+}
+
+/// The region's bars again right after it, and the region twice as long:
+/// 4 bars, 8, 16 -- as the Sequencer's x2.
+void region_dup_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        const uint32_t w = song.loopEnd - song.loopStart;
+        std::vector<Copied> part;
+        copy_region(song, part);
+        shift_from(song, song.loopEnd, w);
+        paste_at(song, part, song.loopEnd);
+        song.loopEnd += w;
+    });
+}
+
+void region_clear_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) { song.loopStart = song.loopEnd = 0; });
+}
+
+void region_block_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        const auto& cs = song.tracks[s_selTrack].clips;
+        if (s_selIndex < 0 || s_selIndex >= (int)cs.size()) return;
+        song.loopStart = cs[s_selIndex].bar;
+        song.loopEnd = cs[s_selIndex].bar + cs[s_selIndex].bars;
+    });
+}
+
+void region_set_cb(lv_event_t*)
+{
+    close_overlay();
+    enter_region_edit();
+}
+
+// ── merging tracks ─────────────────────────────────────────────────────────
+
+/// The tracks in @p mask, over the region or the whole song, into one clip.
+void run_merge(uint8_t mask)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    uint32_t from = 0, to = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        if (song.hasRegion()) { from = song.loopStart; to = song.loopEnd; }
+        else                  { from = 0; to = song.songEnd(); }
+    }
+    if (se->playing()) se->stop();
+    if (to > from && se->requestMerge(mask, from, to)) {
+        s_merging = true;
+        s_selIndex = -1;
+        set_text(s_infoLabel, "Merging ...");
+    } else {
+        set_text(s_infoLabel, "Nothing to merge there.");
+    }
+}
+
+void paint_merge_toggles()
+{
+    for (int t = 0; t < kTracks; ++t) {
+        lv_obj_t* b = s_mergeToggles[t];
+        if (!b) continue;
+        const bool on = s_mergeMask & (1u << t);
+        lv_obj_set_style_bg_color(b, on ? kAccent : kPanel, 0);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0), on ? kInk : kText, 0);
+    }
+}
+
+void merge_toggle_cb(lv_event_t* e)
+{
+    s_mergeMask ^= (uint8_t)(1u << (int)(intptr_t)lv_event_get_user_data(e));
+    paint_merge_toggles();
+}
+
+void merge_tracks_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se) return;
+    std::string where;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        char buf[64];
+        if (song.hasRegion()) std::snprintf(buf, sizeof(buf), "Merge tracks, bars %u - %u", (unsigned)(song.loopStart + 1), (unsigned)song.loopEnd);
+        else                  std::snprintf(buf, sizeof(buf), "Merge tracks, the whole song");
+        where = buf;
+    }
+    close_overlay();
+    overlay_list(where.c_str());
+    lv_obj_t* row = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 34);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    for (int t = 0; t < kTracks; ++t) {
+        lv_obj_t* b = lv_button_create(row);
+        lv_obj_set_height(b, 32);
+        lv_obj_set_flex_grow(b, 1);
+        lv_obj_set_style_radius(b, 6, 0);
+        lv_obj_set_style_shadow_width(b, 0, 0);
+        lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
+        lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+        lv_obj_add_event_cb(b, merge_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+        lv_obj_t* l = lv_label_create(b);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
+        lv_label_set_text_fmt(l, "%d", t + 1);
+        lv_obj_center(l);
+#ifdef ARR_USE_ENCODER
+        if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, b);
+#endif
+        s_mergeToggles[t] = b;
+    }
+    paint_merge_toggles();
+    lv_obj_t* hint = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, kDim, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_text(hint, "The lit tracks become one clip on the lowest of them, at their volumes; "
+                            "muted tracks are left as they are.");
+    overlay_item(LV_SYMBOL_SHUFFLE " Merge", [](lv_event_t*) {
+        for (auto& b : s_mergeToggles) b = nullptr;
+        run_merge(s_mergeMask);
+    }, nullptr, true);
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", [](lv_event_t*) {
+        for (auto& b : s_mergeToggles) b = nullptr;
+        close_overlay();
+    }, nullptr);
+}
+
+void merge_all_cb(lv_event_t*) { run_merge(0x0F); }
+
+// ── the EDIT menu ──────────────────────────────────────────────────────────
+
+void edit_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se || s_overlay || s_merging) return;
+    bool region = false, block = false;
+    uint32_t a = 0, b = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        region = song.hasRegion();
+        a = song.loopStart;
+        b = song.loopEnd;
+        const auto& cs = song.tracks[s_selTrack].clips;
+        block = s_selIndex >= 0 && s_selIndex < (int)cs.size();
+    }
+    char title[64];
+    if (region) std::snprintf(title, sizeof(title), "Edit   (loop region: bars %u - %u)", (unsigned)(a + 1), (unsigned)b);
+    else        std::snprintf(title, sizeof(title), "Edit   (no loop region)");
+    overlay_list(title);
+    overlay_item(region ? "Move the loop region  (L, click, R)" : "Set a loop region  (L, click, R)", region_set_cb, nullptr);
+    if (block) overlay_item("Loop region = the selected block", region_block_cb, nullptr);
+    if (region) {
+        overlay_item(LV_SYMBOL_COPY " Copy the region", region_copy_cb, nullptr);
+        char buf[64];
+        if (!s_clipboard.empty()) {
+            std::snprintf(buf, sizeof(buf), LV_SYMBOL_PASTE " Paste %u bars at the region", (unsigned)s_clipboardBars);
+            overlay_item(buf, region_paste_cb, nullptr);
+        }
+        overlay_item(LV_SYMBOL_PLUS " Duplicate the region  x2", region_dup_cb, nullptr);
+    }
+    overlay_item(LV_SYMBOL_SHUFFLE " Merge tracks ...", merge_tracks_cb, nullptr);
+    overlay_item(LV_SYMBOL_SHUFFLE " Merge all tracks into one", merge_all_cb, nullptr);
+    if (region) overlay_item(LV_SYMBOL_TRASH " Clear the loop region", region_clear_cb, nullptr);
+    overlay_item("Song length ...", [](lv_event_t* e) { close_overlay(); length_cb(e); }, nullptr);
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
 // ── building ───────────────────────────────────────────────────────────────
 
 lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb_t cb, void* ud = nullptr)
@@ -1392,13 +1784,25 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_remove_style_all(gap);
     lv_obj_set_size(gap, 6, 1);
     s_tools[3] = make_button(tools, 46, LV_SYMBOL_PLUS " ADD", add_cb);
-    s_tools[4] = make_button(tools, 38, "LEN", length_cb);
+    s_tools[4] = make_button(tools, 38, "EDIT", edit_cb);
     s_tools[5] = make_button(tools, 34, "Z-", zoom_out_cb);
     s_tools[6] = make_button(tools, 34, "Z+", zoom_in_cb);
 #ifdef ARR_USE_ENCODER
     s_toolGroup = lv_group_create();
     for (int t = 0; t < kBlockTools; ++t) lv_group_add_obj(s_toolGroup, s_tools[t]);
+    /* The region's handle: nothing to see (the band on the ruler is what
+     * shows), only something editable for the encoder to turn. */
+    s_regionHandle = lv_CreateEditableButton(s_root);
+    lv_obj_add_flag(s_regionHandle, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(s_regionHandle, 1, 1);
+    lv_obj_set_style_bg_opa(s_regionHandle, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(s_regionHandle, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(s_regionHandle, region_cb, LV_EVENT_KEY, nullptr);
+    lv_obj_add_event_cb(s_regionHandle, region_cb, LV_EVENT_CLICKED, nullptr);
+    s_regionGroup = lv_group_create();
+    lv_group_add_obj(s_regionGroup, s_regionHandle);
 #endif
+    s_regionEdit = RegionEdit::None;
     s_toolMode = false;
     paint_tools();
 
@@ -1443,8 +1847,13 @@ void Arrange_destroy(lv_obj_t* root)
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
     if (s_toolGroup) { lv_group_delete(s_toolGroup); s_toolGroup = nullptr; }
+    if (s_regionGroup) { lv_group_delete(s_regionGroup); s_regionGroup = nullptr; }
 #endif
     s_toolMode = false;
+    s_regionEdit = RegionEdit::None;
+    s_regionHandle = nullptr;
+    s_merging = false;
+    for (auto& b : s_mergeToggles) b = nullptr;
     s_moveAxis = MoveAxis::None;
     for (auto& a : s_moveArrows) a = nullptr;
     s_overlay = nullptr;
