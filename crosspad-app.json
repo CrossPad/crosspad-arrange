@@ -11,11 +11,12 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.26.0",
+    "crosspad-core": ">=1.25.0",
     "crosspad-gui": ">=1.15.0"
   },
   "changelog": [
-    "0.4.0: MOVE across tracks with arrows at the block; EDIT menu: a loop region (L/R turned, LOOP goes round it), copy / paste / duplicate x2 of the region, merge tracks or all tracks into one clip, song length; requires core 1.26 and gui 1.15",
+    "0.4.1: builds on the PC against LVGL 9.4 (0.2.1 merged in); requires core 1.25 and gui 1.15",
+    "0.4.0: MOVE across tracks with arrows at the block; EDIT menu: a loop region (L/R turned, LOOP goes round it), copy / paste / duplicate x2 of the region, merge tracks or all tracks into one clip, song length; requires core 1.25 and gui 1.15",
     "0.3.0: a click on a block takes the encoder to MOVE/DUP/DEL (MOVE is turned a bar per detent, the next click comes back; DUP and DEL come back at once; the power button's click too); wider track numbers; the songs list edits the open song's tempo and name, as requests; requires core 1.23 and gui 1.13",
     "0.2.0: project list, clip list and opening a song are requests to the song engine (core 1.21 ISongEngine), filled in when the card answers; a song that cannot be read is left untouched; blocks drawn per track; the selection follows the exact block an edit moved",
     "0.1.0: Generated from the CrossPad app template"
