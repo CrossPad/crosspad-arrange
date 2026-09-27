@@ -460,12 +460,12 @@ void rebuild_timeline()
  * the card on the same core. */
 void set_bg(lv_obj_t* o, lv_color_t c)
 {
-    if (o && !lv_color_eq(lv_obj_get_style_bg_color(o, 0), c)) lv_obj_set_style_bg_color(o, c, 0);
+    if (o && !lv_color_eq(lv_obj_get_style_bg_color(o, LV_PART_MAIN), c)) lv_obj_set_style_bg_color(o, c, 0);
 }
 
 void set_ink(lv_obj_t* o, lv_color_t c)
 {
-    if (o && !lv_color_eq(lv_obj_get_style_text_color(o, 0), c)) lv_obj_set_style_text_color(o, c, 0);
+    if (o && !lv_color_eq(lv_obj_get_style_text_color(o, LV_PART_MAIN), c)) lv_obj_set_style_text_color(o, c, 0);
 }
 
 void set_text(lv_obj_t* l, const char* text)
