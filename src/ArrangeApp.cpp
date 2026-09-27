@@ -25,7 +25,7 @@
  * encoder down to MOVE/DUP/DEL. DUP and DEL act and bring it back to the
  * blocks; MOVE is turned -- each detent a bar -- and the next click brings it
  * back. The power button's click also goes back up. The songs list edits the
- * open song: its tempo (each song has its own) and its name.
+ * open song: its tempo (each song has its own) and its name, or deletes it.
  *
  * Everything goes through crosspad::ISongEngine: edits are made on its song
  * under songMutex() and committed, which hands playback the new arrangement
@@ -141,9 +141,12 @@ uint32_t  s_pendingGen = 0;
 lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
-/* A rename or tempo change the platform is doing on the card. */
+/* A rename, tempo change or delete the platform is doing on the card. */
+enum class EditKind : uint8_t { Tempo, Rename, Delete };
 bool      s_editing = false;
-bool      s_editIsRename = false;
+EditKind  s_editKind = EditKind::Tempo;
+/* The song window's tempo row; it lives and dies with the overlay. */
+lv_obj_t* s_tempoItem = nullptr;
 
 #ifdef ARR_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
@@ -537,8 +540,10 @@ void tick_cb(lv_timer_t*)
         show_tempo();                 // the tempo row, if its window is still open
         rebuild_timeline();
         update_info();
-        if (failed && s_editIsRename) rename_failed();
-        else if (failed && s_infoLabel) lv_label_set_text(s_infoLabel, "The tempo was not set: no song is open.");
+        if (failed && s_editKind == EditKind::Rename) rename_failed();
+        else if (failed && s_editKind == EditKind::Delete && s_infoLabel) {
+            lv_label_set_text(s_infoLabel, "Not deleted: no card, or the card kept some of its files.");
+        } else if (failed && s_infoLabel) lv_label_set_text(s_infoLabel, "The tempo was not set: no song is open.");
     }
     if (s_overlay) return;
     uint32_t shape = 0, total = 0;
@@ -969,6 +974,7 @@ void close_overlay()
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
+    s_tempoItem = nullptr;
 }
 
 lv_obj_t* overlay_list(const char* title)
@@ -1047,7 +1053,6 @@ void cancel_cb(lv_event_t*) { close_overlay(); }
 // ── the open song's settings: tempo and name ───────────────────────────────
 
 int32_t   s_editBpm = 120;          // the tempo being dialled, applied on the click that ends it
-lv_obj_t* s_tempoItem = nullptr;
 
 void show_tempo()
 {
@@ -1069,7 +1074,7 @@ void tempo_cb(lv_event_t* e)
             auto* se = engine();
             if (se && se->requestTempo((float)s_editBpm)) {
                 s_editing = true;
-                s_editIsRename = false;
+                s_editKind = EditKind::Tempo;
                 lv_label_set_text(lv_obj_get_child(b, 0), "Setting the tempo ...");
             }
         } else if (g) {
@@ -1104,7 +1109,7 @@ void rename_done_cb(lv_event_t* e)
     if (!ok || !se || name.empty()) return;
     if (!se->requestRename(name)) { rename_failed(); return; }
     s_editing = true;
-    s_editIsRename = true;
+    s_editKind = EditKind::Rename;
     if (s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Renaming to %s ...", name.c_str());
 }
 
@@ -1138,6 +1143,43 @@ void rename_cb(lv_event_t*)
         lv_group_set_editing(s_overlayGroup, true);
     }
 #endif
+}
+
+void delete_confirmed_cb(lv_event_t*)
+{
+    close_overlay();
+    auto* se = engine();
+    if (!se || !se->requestDelete()) return;
+    s_selTrack = 0;
+    s_selIndex = -1;
+    s_editing = true;
+    s_editKind = EditKind::Delete;
+    if (s_infoLabel) lv_label_set_text(s_infoLabel, "Deleting ...");
+}
+
+/// Asked once more, "Keep it" first: the song and its clips leave the card.
+void delete_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se) return;
+    std::string title;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        title = "Delete \"" + se->song().name + "\"?";
+    }
+    close_overlay();
+    overlay_list(title.c_str());
+    lv_obj_t* hint = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, kDim, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_text(hint, "The song and every clip in it go from the card; this cannot be undone. "
+                            "The first song left opens instead, or a new one.");
+    overlay_item(LV_SYMBOL_LEFT " Keep it", song_edit_cb, nullptr, true);
+    lv_obj_t* del = overlay_item(LV_SYMBOL_TRASH " Delete", delete_confirmed_cb, nullptr);
+    lv_obj_set_style_bg_color(del, kMute, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(del, 0), kInk, 0);
 }
 
 void song_edit_cb(lv_event_t*)
@@ -1181,7 +1223,8 @@ void song_edit_cb(lv_event_t*)
     lv_label_set_text(hint, "Click, turn, click to set. Clips keep their speed: each block is resized to "
                             "what its file lasts at the new tempo. SYNC plays the sequencer at this tempo.");
     overlay_item(LV_SYMBOL_EDIT " Rename", rename_cb, nullptr);
-    overlay_item(LV_SYMBOL_OK " Done", [](lv_event_t*) { close_overlay(); s_tempoItem = nullptr; }, nullptr, true);
+    overlay_item(LV_SYMBOL_TRASH " Delete song", delete_cb, nullptr);
+    overlay_item(LV_SYMBOL_OK " Done", [](lv_event_t*) { close_overlay(); }, nullptr, true);
 }
 
 void request_list(Pending what, const char* title)
@@ -1208,7 +1251,7 @@ void fill_projects()
         current = se->song().name;
     }
     if (!current.empty()) {
-        const std::string edit = std::string(LV_SYMBOL_SETTINGS " Edit \"") + current + "\"  (tempo, name)";
+        const std::string edit = std::string(LV_SYMBOL_SETTINGS " Edit \"") + current + "\"  (tempo, name, delete)";
         overlay_item(edit.c_str(), song_edit_cb, nullptr);
     }
     overlay_item(LV_SYMBOL_PLUS " New song", project_pick_cb, (void*)(intptr_t)-1, true);

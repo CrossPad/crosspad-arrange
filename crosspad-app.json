@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.25.0",
+    "crosspad-core": ">=1.30.0",
     "crosspad-gui": ">=1.15.0"
   },
   "changelog": [
+    "0.5.0: the song window deletes the open song -- asked once more, Keep it first -- and the first song left opens instead, or a new one; the tempo row no longer outlives its window (a rename finishing wrote to it after it was freed); requires core 1.30 and gui 1.15",
     "0.4.1: builds on the PC against LVGL 9.4 (0.2.1 merged in); requires core 1.25 and gui 1.15",
     "0.4.0: MOVE across tracks with arrows at the block; EDIT menu: a loop region (L/R turned, LOOP goes round it), copy / paste / duplicate x2 of the region, merge tracks or all tracks into one clip, song length; requires core 1.25 and gui 1.15",
     "0.3.0: a click on a block takes the encoder to MOVE/DUP/DEL (MOVE is turned a bar per detent, the next click comes back; DUP and DEL come back at once; the power button's click too); wider track numbers; the songs list edits the open song's tempo and name, as requests; requires core 1.23 and gui 1.13",
