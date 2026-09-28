@@ -13,8 +13,12 @@
  *          block
  *   lanes  a header per track (tap: mute), the timeline beside them
  *   tools  MOVE, DUP and DEL act on the selected block; ADD a clip from the
- *          project's library to the selected track, EDIT, and zoom out/in on
- *          the timeline
+ *          project's library to the selected track, EDIT, MIX, and zoom
+ *          out/in on the timeline
+ *   MIX    the four tracks' levels: a strip each side by side, as on a desk --
+ *          a tall fader in dB (-inf, then 0.6 dB a step as in the Mixer app,
+ *          unity at 90 %, +6 dB at the top), the dB, M; heard at once, saved
+ *          with the song
  *   EDIT   the loop region (L and R, turned like MOVE; with LOOP on the song
  *          goes round it, and PLAY starts at it), copy / paste / duplicate x2
  *          of the region across every track -- inserted, so nothing after it
@@ -89,6 +93,7 @@ const lv_color_t kInk    = lv_color_hex(0x16181B);
 const lv_color_t kAccent = lv_color_hex(0xC6FF47);
 const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
 const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
 
 /// A clip's colour, from its file: every block of the same clip matches, so a
 /// repeat reads as a repeat anywhere on the timeline.
@@ -116,9 +121,9 @@ lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
 lv_obj_t* s_heads[kTracks] = {};
 /* MOVE, DUP, DEL (the selected block's, reached by clicking it), then ADD,
- * LEN, zoom out, zoom in. */
+ * EDIT, MIX, zoom out, zoom in. */
 constexpr int kBlockTools = 3;
-lv_obj_t* s_tools[7] = {};
+lv_obj_t* s_tools[8] = {};
 lv_obj_t* s_lenLabel = nullptr;     // the value in the LEN window
 lv_obj_t* s_backBtn = nullptr;
 lv_obj_t* s_projBtn = nullptr;
@@ -145,8 +150,11 @@ bool      s_opening = false;
 enum class EditKind : uint8_t { Tempo, Rename, Delete };
 bool      s_editing = false;
 EditKind  s_editKind = EditKind::Tempo;
-/* The song window's tempo row; it lives and dies with the overlay. */
+/* The song window's tempo row, the MIX window's dB and M; they live and die
+ * with the overlay. */
 lv_obj_t* s_tempoItem = nullptr;
+lv_obj_t* s_mixDb[kTracks] = {};
+lv_obj_t* s_mixMute[kTracks] = {};
 
 #ifdef ARR_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
@@ -667,7 +675,10 @@ void paint_tools()
 {
     for (int t = 0; t < kBlockTools; ++t) {
         if (!s_tools[t]) continue;
-        lv_obj_set_style_text_color(lv_obj_get_child(s_tools[t], 0), s_toolMode ? kText : kDim, 0);
+        /* MOVE's label takes its colour from the button, so it turns dark on
+         * the accent while MOVE is turned; DUP and DEL carry their own. */
+        lv_obj_set_style_text_color(t == 0 ? s_tools[t] : lv_obj_get_child(s_tools[t], 0),
+                                    s_toolMode ? kText : kDim, 0);
         lv_obj_set_style_border_width(s_tools[t], s_toolMode ? 1 : 0, 0);
         lv_obj_set_style_border_color(s_tools[t], kAccent, 0);
     }
@@ -975,6 +986,8 @@ void close_overlay()
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
     s_tempoItem = nullptr;
+    for (auto& d : s_mixDb) d = nullptr;
+    for (auto& m : s_mixMute) m = nullptr;
 }
 
 lv_obj_t* overlay_list(const char* title)
@@ -1202,12 +1215,13 @@ void song_edit_cb(lv_event_t*)
     lv_obj_set_style_shadow_width(s_tempoItem, 0, 0);
     lv_obj_set_style_bg_color(s_tempoItem, kPanel, 0);
     lv_obj_set_style_bg_color(s_tempoItem, kAccent, LV_STATE_EDITED);
+    /* On the button: only it is ever EDITED; the label takes the colour. */
+    lv_obj_set_style_text_color(s_tempoItem, kText, 0);
+    lv_obj_set_style_text_color(s_tempoItem, kInk, LV_STATE_EDITED);
     lv_obj_set_style_outline_color(s_tempoItem, kHead, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_outline_width(s_tempoItem, 2, LV_STATE_FOCUS_KEY);
     lv_obj_t* l = lv_label_create(s_tempoItem);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(l, kText, 0);
-    lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
     lv_obj_center(l);
     lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_KEY, nullptr);
     lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_CLICKED, nullptr);
@@ -1723,6 +1737,170 @@ lv_obj_t* make_row(lv_obj_t* parent, int32_t h)
     return r;
 }
 
+// ── MIX: the four tracks' levels ───────────────────────────────────────────
+
+/* Fader travel as the Mixer app's: 0 is -inf, then 0.6 dB a step up to +6 dB
+ * at the top, which puts unity at 90. */
+constexpr int32_t kFaderMax   = 100;
+constexpr int32_t kFaderUnity = 90;
+constexpr float   kDbPerStep  = 0.6f;
+
+float fader_to_gain(int32_t v)
+{
+    if (v <= 0) return 0.0f;
+    return powf(10.0f, ((float)(v - kFaderUnity) * kDbPerStep) / 20.0f);
+}
+
+int32_t gain_to_fader(float g)
+{
+    if (g <= 0.0f) return 0;
+    const int32_t v = (int32_t)lroundf(20.0f * log10f(g) / kDbPerStep) + kFaderUnity;
+    return v < 1 ? 1 : (v > kFaderMax ? kFaderMax : v);
+}
+
+/// Each track's dB and M as the song has them.
+void mix_show()
+{
+    auto* se = engine();
+    if (!se) return;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    for (int t = 0; t < kTracks; ++t) {
+        const auto& tr = se->song().tracks[t];
+        if (s_mixDb[t]) {
+            char buf[12];
+            if (tr.volume <= 0.0f) std::snprintf(buf, sizeof(buf), "-inf");
+            else                   std::snprintf(buf, sizeof(buf), "%+.1f dB", (double)(20.0f * log10f(tr.volume)));
+            set_text(s_mixDb[t], buf);
+        }
+        if (s_mixMute[t]) {
+            set_bg(s_mixMute[t], tr.muted ? kMute : kTrack);          // a button on the strip's panel
+            set_ink(lv_obj_get_child(s_mixMute[t], 0), tr.muted ? kInk : kText);
+        }
+    }
+}
+
+/// A fader moved: heard at once; commit() saves the song once it rests.
+void mix_fader_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se) return;
+    const int t = (int)(intptr_t)lv_event_get_user_data(e);
+    const float g = fader_to_gain(lv_slider_get_value(static_cast<lv_obj_t*>(lv_event_get_target(e))));
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        se->song().tracks[t].volume = g;
+    }
+    se->commit();
+    mix_show();
+}
+
+void mix_mute_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se) return;
+    const int t = (int)(intptr_t)lv_event_get_user_data(e);
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& tr = se->song().tracks[t];
+        tr.muted = !tr.muted;
+    }
+    se->commit();
+    mix_show();
+}
+
+/// A track's strip, as on a desk: its number, a tall fader, the dB, M.
+void mix_strip(lv_obj_t* strips, int t, float volume)
+{
+    lv_obj_t* strip = lv_obj_create(strips);
+    lv_obj_remove_style_all(strip);
+    lv_obj_set_height(strip, LV_PCT(100));
+    lv_obj_set_flex_grow(strip, 1);
+    lv_obj_set_style_bg_color(strip, kPanel, 0);
+    lv_obj_set_style_bg_opa(strip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(strip, 6, 0);
+    lv_obj_set_style_pad_ver(strip, 4, 0);
+    lv_obj_set_style_pad_row(strip, 4, 0);
+    lv_obj_set_flex_flow(strip, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(strip, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* num = lv_label_create(strip);
+    lv_obj_set_style_text_font(num, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(num, kText, 0);
+    lv_label_set_text_fmt(num, "%d", t + 1);
+
+    /* Taller than wide: LVGL makes it a vertical slider, the bottom its 0. */
+    lv_obj_t* s = lv_slider_create(strip);
+    lv_obj_set_width(s, 8);
+    lv_obj_set_flex_grow(s, 1);
+    lv_slider_set_range(s, 0, kFaderMax);
+    lv_slider_set_value(s, gain_to_fader(volume), LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s, kTrack, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s, 4, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s, kAccent, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s, kHead, LV_PART_KNOB);
+    lv_obj_set_style_radius(s, 4, LV_PART_KNOB);
+    lv_obj_set_style_pad_hor(s, 10, LV_PART_KNOB);     // a fader cap, wider than its slot
+    lv_obj_set_style_pad_ver(s, 4, LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(s, 0, LV_PART_KNOB);
+    lv_obj_set_style_bg_color(s, kAccent, (lv_style_selector_t)LV_PART_KNOB | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(s, kAccent, (lv_style_selector_t)LV_PART_KNOB | LV_STATE_EDITED);
+    lv_obj_set_style_outline_width(s, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_ext_click_area(s, 16);
+    lv_obj_add_event_cb(s, mix_fader_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)t);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s);
+#endif
+
+    s_mixDb[t] = lv_label_create(strip);
+    lv_obj_set_style_text_font(s_mixDb[t], &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_mixDb[t], kText, 0);
+    lv_label_set_text(s_mixDb[t], "");
+
+    s_mixMute[t] = make_button(strip, 40, "M", mix_mute_cb, (void*)(intptr_t)t);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s_mixMute[t]);
+#endif
+}
+
+void mix_done_cb(lv_event_t*)
+{
+    close_overlay();
+    rebuild_timeline();                          // a muted track dims on the timeline
+}
+
+/// MIX: a strip per track side by side, Done beside the title.
+void mix_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se || s_overlay) return;
+    float vol[kTracks];
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        for (int t = 0; t < kTracks; ++t) vol[t] = se->song().tracks[t].volume;
+    }
+    overlay_list("Mix");
+    lv_obj_set_style_pad_row(s_overlay, 4, 0);
+    lv_obj_t* head = make_row(s_overlay, 24);
+    lv_obj_t* title = lv_obj_get_child(s_overlay, 0);
+    lv_obj_set_parent(title, head);
+    lv_obj_set_flex_grow(title, 1);
+    lv_obj_t* done = make_button(head, 64, LV_SYMBOL_OK " Done", mix_done_cb);
+    lv_obj_set_style_bg_color(done, kAccent, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(done, 0), kInk, 0);
+
+    lv_obj_t* strips = make_row(s_overlay, 10);
+    lv_obj_set_flex_grow(strips, 1);
+    lv_obj_set_style_pad_column(strips, 6, 0);
+    for (int t = 0; t < kTracks; ++t) mix_strip(strips, t, vol[t]);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, done);   // after the strips: the first fader has the focus
+#endif
+    mix_show();
+}
+
 } // namespace
 
 lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
@@ -1812,12 +1990,13 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_t* tools = make_row(s_root, 24);
     lv_obj_set_style_pad_column(tools, 3, 0);
     s_tools[0] = lv_CreateEditableButton(tools);
-    lv_obj_set_size(s_tools[0], 48, 22);
+    lv_obj_set_size(s_tools[0], 44, 22);
     lv_obj_set_style_pad_all(s_tools[0], 0, 0);
     lv_obj_set_style_radius(s_tools[0], 6, 0);
     lv_obj_set_style_shadow_width(s_tools[0], 0, 0);
     lv_obj_set_style_bg_color(s_tools[0], kPanel, 0);
     lv_obj_set_style_bg_color(s_tools[0], kAccent, LV_STATE_EDITED);
+    lv_obj_set_style_text_color(s_tools[0], kInk, LV_STATE_EDITED);   // the label takes it from here
     lv_obj_set_style_outline_color(s_tools[0], kHead, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_outline_width(s_tools[0], 2, LV_STATE_FOCUS_KEY);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_KEY, nullptr);
@@ -1826,19 +2005,19 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     {
         lv_obj_t* l = lv_label_create(s_tools[0]);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
         lv_label_set_text(l, "MOVE");
         lv_obj_center(l);
     }
-    s_tools[1] = make_button(tools, 38, "DUP", dup_cb);
-    s_tools[2] = make_button(tools, 38, "DEL", del_cb);
+    s_tools[1] = make_button(tools, 34, "DUP", dup_cb);
+    s_tools[2] = make_button(tools, 34, "DEL", del_cb);
     lv_obj_t* gap = lv_obj_create(tools);
     lv_obj_remove_style_all(gap);
-    lv_obj_set_size(gap, 6, 1);
-    s_tools[3] = make_button(tools, 46, LV_SYMBOL_PLUS " ADD", add_cb);
-    s_tools[4] = make_button(tools, 38, "EDIT", edit_cb);
-    s_tools[5] = make_button(tools, 34, "Z-", zoom_out_cb);
-    s_tools[6] = make_button(tools, 34, "Z+", zoom_in_cb);
+    lv_obj_set_size(gap, 4, 1);
+    s_tools[3] = make_button(tools, 42, LV_SYMBOL_PLUS " ADD", add_cb);
+    s_tools[4] = make_button(tools, 36, "EDIT", edit_cb);
+    s_tools[5] = make_button(tools, 34, "MIX", mix_cb);
+    s_tools[6] = make_button(tools, 28, "Z-", zoom_out_cb);
+    s_tools[7] = make_button(tools, 28, "Z+", zoom_in_cb);
 #ifdef ARR_USE_ENCODER
     s_toolGroup = lv_group_create();
     for (int t = 0; t < kBlockTools; ++t) lv_group_add_obj(s_toolGroup, s_tools[t]);
@@ -1914,6 +2093,8 @@ void Arrange_destroy(lv_obj_t* root)
     s_opening = false;
     s_lenLabel = nullptr;
     s_tempoItem = nullptr;
+    for (auto& d : s_mixDb) d = nullptr;
+    for (auto& m : s_mixMute) m = nullptr;
     s_nameArea = nullptr;
     for (auto& b : s_blocks) b = Block{};
     for (auto& h : s_heads) h = nullptr;
