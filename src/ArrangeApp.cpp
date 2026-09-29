@@ -58,6 +58,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -109,7 +110,17 @@ uint32_t clip_color(const std::string& file)
     return kClipColors[h % 8];
 }
 
-struct Block { lv_obj_t* obj = nullptr; int track = 0; int index = 0; };
+/* A block drawn, and its clip's waveform once the engine has it. */
+struct Block {
+    lv_obj_t*   obj = nullptr;
+    int         track = 0;
+    int         index = 0;
+    std::string file;
+    uint32_t    color = 0;
+    bool        muted = false;
+    std::shared_ptr<const std::vector<uint8_t>> peaks;
+    uint8_t     peakMax = 0;       ///< the loudest value: the waveform is drawn to it
+};
 
 lv_obj_t* s_root = nullptr;
 lv_obj_t* s_timeline = nullptr;
@@ -138,6 +149,18 @@ int32_t  s_pxPerBar = kZoomPx[2];
 int      s_selTrack = 0;
 int      s_selIndex = -1;
 uint32_t s_shape = 0;
+/* Where a waveform's values fall: frames per bar at the song's tempo, frames
+ * per value, and the engine's count of waveforms that have come in. */
+uint32_t s_framesPerBar = 0;
+uint32_t s_peakHop = 0;
+uint32_t s_peaksGen = 0;
+/// A block's waveform starts under its name.
+constexpr int32_t kWaveTop = 13;
+/* Drawn as bars, 2 px and a 1 px gap, on the block's own grid so scrolling
+ * does not shimmer: every fill is a draw task, and LVGL 9.3 walks its whole
+ * list to add one, so a column each made a redraw cost the square of it. */
+constexpr int32_t kWaveBarW = 2;
+constexpr int32_t kWaveBarPitch = 3;
 
 /* The card is read on the platform's side; an overlay opens at once with a
  * line saying so and is filled when the list comes back. */
@@ -206,6 +229,7 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     mix(s.loopStart);
     mix(s.loopEnd);
     mix(s.loop);
+    mix((uint32_t)lroundf(s.bpm * 100.0f));     // where each clip's waveform falls on the bars
     for (int t = 0; t < kTracks; ++t) {
         mix(0xABCDu + t);
         mix(s.tracks[t].muted);
@@ -225,6 +249,70 @@ std::string short_name(const std::string& file)
 }
 
 // ── drawing ────────────────────────────────────────────────────────────────
+
+/// A block's waveform, under its name: the clip at the speed it plays, so a
+/// file shorter than its block ends early, and one made at another tempo
+/// shows where its beats really fall. Drawn to the clip's loudest value --
+/// the lanes are too short for a quiet clip at full scale -- and only the
+/// bars in the area being redrawn.
+void block_draw_cb(lv_event_t* e)
+{
+    const int k = (int)(intptr_t)lv_event_get_user_data(e);
+    if (k < 0 || k >= s_blockCount) return;
+    const Block& b = s_blocks[k];
+    if (!b.peaks || b.peaks->empty() || !b.peakMax || !s_framesPerBar || !s_peakHop || !s_pxPerBar) return;
+    lv_layer_t* layer = lv_event_get_layer(e);
+    const lv_area_t& clip = layer->_clip_area;
+    lv_area_t a;
+    lv_obj_get_coords(b.obj, &a);
+    const int32_t top = a.y1 + kWaveTop, bottom = a.y2 - 1;
+    const int32_t mid = (top + bottom) / 2, half = (bottom - top) / 2;
+    if (half <= 0 || bottom < clip.y1 || top > clip.y2) return;
+    const int32_t x1 = std::max(a.x1, clip.x1), x2 = std::min(a.x2, clip.x2);
+    if (x1 > x2) return;
+
+    lv_draw_fill_dsc_t d;
+    lv_draw_fill_dsc_init(&d);
+    /* Dark on the clip's colour; on a muted track's faded block, the colour. */
+    d.color = b.muted ? lv_color_hex(b.color) : kInk;
+    d.opa = b.muted ? LV_OPA_70 : LV_OPA_60;
+    const std::vector<uint8_t>& v = *b.peaks;
+    const double perPx = (double)s_framesPerBar / (double)s_pxPerBar / (double)s_peakHop;
+    /* A bar is the loudest value under its whole pitch, so no hit falls in a
+     * gap; one with sound in it is never less than the silence line. Past
+     * the file's end there is nothing. */
+    for (int32_t bar = (x1 - a.x1) / kWaveBarPitch; bar <= (x2 - a.x1) / kWaveBarPitch; ++bar) {
+        const int32_t px = bar * kWaveBarPitch;
+        const size_t i0 = (size_t)(px * perPx);
+        if (i0 >= v.size()) break;
+        const size_t i1 = std::min(v.size(), std::max(i0 + 1, (size_t)((px + kWaveBarPitch) * perPx)));
+        uint8_t m = 0;
+        for (size_t i = i0; i < i1; ++i) m = std::max(m, v[i]);
+        const int32_t h = m ? std::max<int32_t>(1, (int32_t)m * half / b.peakMax) : 0;
+        const lv_area_t r = {a.x1 + px, mid - h, std::min(a.x2, a.x1 + px + kWaveBarW - 1), mid + h};
+        lv_draw_fill(layer, &d, &r);
+    }
+}
+
+/// @p b's waveform, and the value it is drawn to.
+void set_peaks(Block& b, const crosspad::ClipPeaks& cp)
+{
+    b.peaks = cp.values;
+    b.peakMax = cp.values && !cp.values->empty() ? *std::max_element(cp.values->begin(), cp.values->end()) : 0;
+    s_peakHop = cp.hop;
+}
+
+/// The waveforms that have come in since the blocks were drawn.
+void take_peaks(crosspad::ISongEngine* se)
+{
+    for (int i = 0; i < s_blockCount; ++i) {
+        Block& b = s_blocks[i];
+        crosspad::ClipPeaks cp;
+        if (b.peaks || !b.obj || !se->clipPeaks(b.file, cp)) continue;
+        set_peaks(b, cp);
+        lv_obj_invalidate(b.obj);
+    }
+}
 
 void paint_block(const Block& b)
 {
@@ -326,6 +414,8 @@ void rebuild_timeline()
     const auto& song = se->song();
 
     lv_obj_clean(s_timeline);
+    s_framesPerBar = se->framesPerBar();
+    s_peaksGen = se->peaksGeneration();
     s_playhead = nullptr;
     for (auto& a : s_moveArrows) a = nullptr;
     s_blockCount = 0;
@@ -381,11 +471,13 @@ void rebuild_timeline()
             lv_obj_set_style_bg_color(o, lv_color_hex(clip_color(c.file)), 0);
             lv_obj_set_style_bg_opa(o, song.tracks[tr].muted ? LV_OPA_30 : LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(o, 2, 0);
+            lv_obj_set_style_pad_top(o, 1, 0);
             lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
+            lv_obj_add_event_cb(o, block_draw_cb, LV_EVENT_DRAW_MAIN_END, (void*)(intptr_t)s_blockCount);
 
             lv_obj_t* lb = lv_label_create(o);
             lv_obj_set_style_text_font(lb, &lv_font_montserrat_10, 0);
@@ -394,7 +486,16 @@ void rebuild_timeline()
             lv_obj_set_width(lb, LV_PCT(100));
             lv_label_set_text(lb, short_name(c.file).c_str());
 
-            s_blocks[s_blockCount++] = Block{o, tr, i};
+            Block b;
+            b.obj = o;
+            b.track = tr;
+            b.index = i;
+            b.file = c.file;
+            b.color = clip_color(c.file);
+            b.muted = song.tracks[tr].muted;
+            crosspad::ClipPeaks cp;
+            if (se->clipPeaks(c.file, cp)) set_peaks(b, cp);
+            s_blocks[s_blockCount++] = std::move(b);
         }
     }
 
@@ -556,6 +657,10 @@ void tick_cb(lv_timer_t*)
         else if (failed && s_editKind == EditKind::Delete && s_infoLabel) {
             lv_label_set_text(s_infoLabel, "Not deleted: no card, or the card kept some of its files.");
         } else if (failed && s_infoLabel) lv_label_set_text(s_infoLabel, "The tempo was not set: no song is open.");
+    }
+    if (se->peaksGeneration() != s_peaksGen) {
+        s_peaksGen = se->peaksGeneration();
+        take_peaks(se);
     }
     if (s_overlay) return;
     uint32_t shape = 0, total = 0;
