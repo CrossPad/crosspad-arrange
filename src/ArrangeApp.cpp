@@ -54,6 +54,7 @@
 #include "lvgl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -146,13 +147,14 @@ uint32_t  s_pendingGen = 0;
 lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
-/* A rename, tempo change or delete the platform is doing on the card. */
-enum class EditKind : uint8_t { Tempo, Rename, Delete };
+/* A rename, tempo change, delete or export the platform is doing on the card. */
+enum class EditKind : uint8_t { Tempo, Rename, Delete, Export };
 bool      s_editing = false;
 EditKind  s_editKind = EditKind::Tempo;
 /* The song window's tempo row, the MIX window's dB and M; they live and die
  * with the overlay. */
 lv_obj_t* s_tempoItem = nullptr;
+lv_obj_t* s_songList = nullptr;     // a song window's list, under its header
 lv_obj_t* s_mixDb[kTracks] = {};
 lv_obj_t* s_mixMute[kTracks] = {};
 
@@ -508,6 +510,7 @@ void fill_clips();
 void fill_projects();
 void show_tempo();
 void rename_failed();
+void export_done(bool ok);
 
 void tick_cb(lv_timer_t*)
 {
@@ -548,7 +551,8 @@ void tick_cb(lv_timer_t*)
         show_tempo();                 // the tempo row, if its window is still open
         rebuild_timeline();
         update_info();
-        if (failed && s_editKind == EditKind::Rename) rename_failed();
+        if (s_editKind == EditKind::Export) export_done(!failed);
+        else if (failed && s_editKind == EditKind::Rename) rename_failed();
         else if (failed && s_editKind == EditKind::Delete && s_infoLabel) {
             lv_label_set_text(s_infoLabel, "Not deleted: no card, or the card kept some of its files.");
         } else if (failed && s_infoLabel) lv_label_set_text(s_infoLabel, "The tempo was not set: no song is open.");
@@ -985,12 +989,14 @@ void close_overlay()
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
+    s_songList = nullptr;
     s_tempoItem = nullptr;
     for (auto& d : s_mixDb) d = nullptr;
     for (auto& m : s_mixMute) m = nullptr;
 }
 
-lv_obj_t* overlay_list(const char* title)
+/// A window over the timeline: full size, a column, the encoder its own.
+lv_obj_t* overlay_open()
 {
     s_overlay = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_overlay);
@@ -1005,6 +1011,12 @@ lv_obj_t* overlay_list(const char* title)
     s_overlayGroup = lv_group_create();
     if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_overlayGroup);
 #endif
+    return s_overlay;
+}
+
+lv_obj_t* overlay_list(const char* title)
+{
+    overlay_open();
     lv_obj_t* t = lv_label_create(s_overlay);
     lv_obj_set_style_text_color(t, kText, 0);
     lv_label_set_text(t, title);
@@ -1034,32 +1046,147 @@ lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, void* ud, bool accent
     return b;
 }
 
+// ── the song windows: a header with the way back, a list under it ────────
+
+constexpr int32_t kHeadH = 28;
+constexpr int32_t kRowH = 30;
+
+/// A header button: "< SONGS" on the left, an action like "+ NEW" on the right.
+lv_obj_t* head_button(lv_obj_t* head, const char* text, bool accent, lv_event_cb_t cb)
+{
+    lv_obj_t* b = lv_button_create(head);
+    lv_obj_set_size(b, LV_SIZE_CONTENT, kHeadH - 6);
+    lv_obj_set_style_pad_hor(b, 8, 0);
+    lv_obj_set_style_pad_ver(b, 0, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, accent ? kAccent : kBg, 0);
+    lv_obj_set_style_text_color(b, accent ? kInk : kText, 0);
+    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    /* One line of fixed height: "..." only cuts a label that cannot grow. */
+    lv_obj_t* l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_letter_space(l, 1, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(l, 200, 0);
+    lv_obj_set_height(l, lv_font_get_line_height(&lv_font_montserrat_14));
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, b);
+#endif
+    return b;
+}
+
+/// A song window: a header whose left end is the way back (@p back names
+/// where it goes) and whose right end is one action, and a list under it
+/// that scrolls. Rows go into s_songList.
+void song_window(const char* back, lv_event_cb_t backCb, const char* action = nullptr,
+                 lv_event_cb_t actionCb = nullptr)
+{
+    overlay_open();
+    lv_obj_set_style_pad_all(s_overlay, 0, 0);
+    lv_obj_set_style_pad_row(s_overlay, 0, 0);
+    lv_obj_remove_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* head = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, LV_PCT(100), kHeadH);
+    lv_obj_set_style_pad_hor(head, 4, 0);
+    lv_obj_set_style_border_side(head, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(head, kPanel, 0);
+    lv_obj_set_style_border_width(head, 1, 0);
+    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(head, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(head, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    std::string label = std::string(LV_SYMBOL_LEFT "  ") + back;
+    for (char& c : label) c = (char)std::toupper((unsigned char)c);
+    head_button(head, label.c_str(), false, backCb);
+    if (action) head_button(head, action, true, actionCb);
+
+    s_songList = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(s_songList);
+    lv_obj_set_width(s_songList, LV_PCT(100));
+    lv_obj_set_flex_grow(s_songList, 1);
+    lv_obj_set_style_pad_all(s_songList, 6, 0);
+    lv_obj_set_style_pad_row(s_songList, 4, 0);
+    lv_obj_set_flex_flow(s_songList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(s_songList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_songList, LV_SCROLLBAR_MODE_ACTIVE);
+}
+
+/// A row's look, on @p r: dark panel, the text colour on the row so both
+/// labels take it -- dark on the accent while the row is being turned.
+void style_row(lv_obj_t* r)
+{
+    lv_obj_set_size(r, LV_PCT(100), kRowH);
+    lv_obj_set_style_radius(r, 6, 0);
+    lv_obj_set_style_shadow_width(r, 0, 0);
+    lv_obj_set_style_pad_hor(r, 10, 0);
+    lv_obj_set_style_pad_ver(r, 0, 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(r, kPanel, 0);
+    lv_obj_set_style_bg_color(r, kTrack, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(r, kAccent, LV_STATE_EDITED);
+    lv_obj_set_style_text_color(r, kText, 0);
+    lv_obj_set_style_text_color(r, kInk, LV_STATE_EDITED);
+    lv_obj_set_style_outline_color(r, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(r, 2, LV_STATE_FOCUS_KEY);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 8, 0);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+/// A row of the song window's list: @p name on the left, @p value dimmer on
+/// the right. Rows are 30 px and one line each: a long name ends in "...".
+/// @p row is one already made in the list (an editable button), else a new one.
+lv_obj_t* list_row(const char* name, const char* value, lv_event_cb_t cb, void* ud = nullptr,
+                   lv_obj_t* row = nullptr)
+{
+    lv_obj_t* r = row ? row : lv_obj_create(s_songList);
+    lv_obj_remove_style_all(r);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+    style_row(r);
+    if (cb) lv_obj_add_event_cb(r, cb, LV_EVENT_CLICKED, ud);
+    /* One line of fixed height each: "..." only cuts a label that cannot grow. */
+    const int32_t line = lv_font_get_line_height(&lv_font_montserrat_14);
+    lv_obj_t* n = lv_label_create(r);
+    lv_obj_set_style_text_font(n, &lv_font_montserrat_14, 0);
+    lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
+    lv_obj_set_flex_grow(n, 1);
+    lv_obj_set_height(n, line);
+    lv_label_set_text(n, name);
+    lv_obj_t* v = lv_label_create(r);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_opa(v, LV_OPA_60, 0);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(v, LV_PCT(60), 0);
+    lv_obj_set_height(v, line);
+    lv_label_set_text(v, value ? value : "");
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, r);
+#endif
+    return r;
+}
+
+/// Small dim text in the song window's list: a hint, a report line.
+lv_obj_t* list_note(const char* text, const lv_font_t* font = &lv_font_montserrat_10, lv_color_t c = kDim)
+{
+    lv_obj_t* l = lv_label_create(s_songList);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, c, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_text(l, text);
+    return l;
+}
+
 std::vector<std::string> s_projects;
 std::vector<crosspad::ClipInfo> s_library;
-
-void project_pick_cb(lv_event_t* e)
-{
-    const int i = (int)(intptr_t)lv_event_get_user_data(e);
-    auto* se = engine();
-    std::string name;
-    if (i < 0) {
-        /* "Song N", the first N not taken. */
-        for (int n = 1; n < 1000; ++n) {
-            name = "Song " + std::to_string(n);
-            bool taken = false;
-            for (const auto& p : s_projects) if (p == name) { taken = true; break; }
-            if (!taken) break;
-        }
-    } else if (i < (int)s_projects.size()) {
-        name = s_projects[i];
-    }
-    close_overlay();
-    if (!se || name.empty()) return;
-    s_selTrack = 0;
-    s_selIndex = -1;
-    s_opening = se->requestOpen(name);
-    if (s_opening && s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Opening %s ...", name.c_str());
-}
 
 void cancel_cb(lv_event_t*) { close_overlay(); }
 
@@ -1070,10 +1197,11 @@ int32_t   s_editBpm = 120;          // the tempo being dialled, applied on the c
 void show_tempo()
 {
     if (!s_tempoItem) return;
-    lv_label_set_text_fmt(lv_obj_get_child(s_tempoItem, 0), "Tempo  %03d BPM", (int)s_editBpm);
+    lv_label_set_text_fmt(lv_obj_get_child(s_tempoItem, 1), "%03d BPM", (int)s_editBpm);
 }
 
 void song_edit_cb(lv_event_t*);
+void project_cb(lv_event_t*);
 
 /// Turned to dial, clicked to set: a tempo change resizes every block (see
 /// ISongEngine::requestTempo), so it is made once, not per detent.
@@ -1088,7 +1216,7 @@ void tempo_cb(lv_event_t* e)
             if (se && se->requestTempo((float)s_editBpm)) {
                 s_editing = true;
                 s_editKind = EditKind::Tempo;
-                lv_label_set_text(lv_obj_get_child(b, 0), "Setting the tempo ...");
+                lv_label_set_text(lv_obj_get_child(b, 1), "setting ...");
             }
         } else if (g) {
             lv_group_focus_obj(b);
@@ -1103,13 +1231,29 @@ void tempo_cb(lv_event_t* e)
     show_tempo();
 }
 
+/// A row that says what the window is for: the accent, or red for going.
+void emphasise_row(lv_obj_t* r, lv_color_t bg)
+{
+    lv_obj_set_style_bg_color(r, bg, 0);
+    lv_obj_set_style_text_color(r, kInk, 0);
+}
+
+std::string open_song_name()
+{
+    auto* se = engine();
+    if (!se) return {};
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    return se->song().name;
+}
+
 lv_obj_t* s_nameArea = nullptr;
 
 void rename_failed()
 {
     if (s_overlay) return;
-    overlay_list("That name is taken, or not one a folder can have.");
-    overlay_item(LV_SYMBOL_OK " OK", [](lv_event_t*) { close_overlay(); }, nullptr, true);
+    song_window("Rename", song_edit_cb);
+    list_note("That name is taken, or not one a folder can have.", &lv_font_montserrat_14, kText);
+    emphasise_row(list_row(LV_SYMBOL_OK "  OK", nullptr, song_edit_cb), kAccent);
 }
 
 void rename_done_cb(lv_event_t* e)
@@ -1128,23 +1272,23 @@ void rename_done_cb(lv_event_t* e)
 
 void rename_cb(lv_event_t*)
 {
-    auto* se = engine();
-    if (!se) return;
-    std::string name;
-    {
-        std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        name = se->song().name;
-    }
+    const std::string name = open_song_name();
     close_overlay();
-    overlay_list("Rename song");
-    lv_obj_set_style_pad_row(s_overlay, 2, 0);
-    s_nameArea = lv_textarea_create(s_overlay);
+    song_window("Rename", song_edit_cb);
+    lv_obj_remove_flag(s_songList, LV_OBJ_FLAG_SCROLLABLE);
+    s_nameArea = lv_textarea_create(s_songList);
     lv_textarea_set_one_line(s_nameArea, true);
     lv_textarea_set_max_length(s_nameArea, 40);
     lv_textarea_set_text(s_nameArea, name.c_str());
     lv_obj_set_width(s_nameArea, LV_PCT(100));
-    lv_obj_t* kb = lv_keyboard_create(s_overlay);
-    lv_obj_set_size(kb, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_nameArea, kPanel, 0);
+    lv_obj_set_style_border_width(s_nameArea, 0, 0);
+    lv_obj_set_style_radius(s_nameArea, 6, 0);
+    lv_obj_set_style_text_color(s_nameArea, kText, 0);
+    lv_obj_set_style_text_font(s_nameArea, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(s_nameArea, kAccent, LV_PART_CURSOR);
+    lv_obj_t* kb = lv_keyboard_create(s_songList);
+    lv_obj_set_width(kb, LV_PCT(100));
     lv_obj_set_flex_grow(kb, 1);
     lv_keyboard_set_textarea(kb, s_nameArea);
     lv_obj_add_event_cb(kb, rename_done_cb, LV_EVENT_READY, nullptr);
@@ -1173,72 +1317,123 @@ void delete_confirmed_cb(lv_event_t*)
 /// Asked once more, "Keep it" first: the song and its clips leave the card.
 void delete_cb(lv_event_t*)
 {
-    auto* se = engine();
-    if (!se) return;
-    std::string title;
-    {
-        std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        title = "Delete \"" + se->song().name + "\"?";
-    }
+    const std::string title = "Delete \"" + open_song_name() + "\"?";
     close_overlay();
-    overlay_list(title.c_str());
-    lv_obj_t* hint = lv_label_create(s_overlay);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, kDim, 0);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(hint, LV_PCT(100));
-    lv_label_set_text(hint, "The song and every clip in it go from the card; this cannot be undone. "
-                            "The first song left opens instead, or a new one.");
-    overlay_item(LV_SYMBOL_LEFT " Keep it", song_edit_cb, nullptr, true);
-    lv_obj_t* del = overlay_item(LV_SYMBOL_TRASH " Delete", delete_confirmed_cb, nullptr);
-    lv_obj_set_style_bg_color(del, kMute, 0);
-    lv_obj_set_style_text_color(lv_obj_get_child(del, 0), kInk, 0);
+    song_window("Delete song", song_edit_cb);
+    list_note(title.c_str(), &lv_font_montserrat_14, kText);
+    list_note("The song and every clip in it go from the card; this cannot be undone. "
+              "The first song left opens instead, or a new one.");
+    lv_obj_t* keep = list_row("Keep it", nullptr, song_edit_cb);
+    emphasise_row(list_row(LV_SYMBOL_TRASH "  Delete", nullptr, delete_confirmed_cb), kMute);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(keep);
+#endif
 }
 
+/// What the export wrote, where, and what it left out -- or why it did not.
+void export_done(bool ok)
+{
+    auto* se = engine();
+    if (!se) return;
+    const std::vector<std::string> report = se->editReport();
+    if (s_overlay) {
+        if (s_infoLabel && !report.empty()) set_text(s_infoLabel, report[0].c_str());
+        return;
+    }
+    song_window("Ableton Live", song_edit_cb);
+    list_note(ok ? LV_SYMBOL_OK "  Live Set written" : LV_SYMBOL_WARNING "  No Live Set written",
+              &lv_font_montserrat_14, ok ? kAccent : kMute);
+    for (size_t i = 0; i < report.size() && i < 6; ++i) {
+        list_note(report[i].c_str(), i ? &lv_font_montserrat_10 : &lv_font_montserrat_14, i ? kDim : kText);
+    }
+    if (report.size() > 6) {
+        list_note(("... and " + std::to_string(report.size() - 6) + " more").c_str());
+    }
+    if (ok) list_note("Open the .als on the card in Live 12, or copy the song's folder off it first.");
+    lv_obj_t* done = list_row(LV_SYMBOL_OK "  OK", nullptr, [](lv_event_t*) { close_overlay(); });
+    emphasise_row(done, kAccent);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(done);
+#endif
+}
+
+void export_cb(lv_event_t*)
+{
+    close_overlay();
+    auto* se = engine();
+    if (!se || !se->requestExportLiveSet()) return;
+    s_editing = true;
+    s_editKind = EditKind::Export;
+    if (s_infoLabel) lv_label_set_text(s_infoLabel, "Writing the Ableton Live Set ...");
+}
+
+/// The open song's settings, a row each: tempo (click, turn, click), name,
+/// the export and the delete. Back is the songs list.
 void song_edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se) return;
-    std::string title = "Song";
+    std::string name, summary;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
         s_editBpm = song.bpm > 0.0f ? (int32_t)lroundf(song.bpm) : 120;
-        title = "Song: " + song.name;
+        name = song.name;
+        size_t clips = 0;
+        for (const auto& t : song.tracks) clips += t.clips.size();
+        summary = std::to_string(song.playEnd()) + " bars, " + std::to_string(clips) +
+                  (clips == 1 ? " clip" : " clips") + ", " + std::to_string((int)song.beatsPerBar) + "/4";
     }
     close_overlay();
-    overlay_list(title.c_str());
-    /* The tempo row is turned like MOVE: click, turn, click. */
-    s_tempoItem = lv_CreateEditableButton(s_overlay);
-    lv_obj_set_size(s_tempoItem, LV_PCT(100), 24);
-    lv_obj_set_style_radius(s_tempoItem, 6, 0);
-    lv_obj_set_style_shadow_width(s_tempoItem, 0, 0);
-    lv_obj_set_style_bg_color(s_tempoItem, kPanel, 0);
-    lv_obj_set_style_bg_color(s_tempoItem, kAccent, LV_STATE_EDITED);
-    /* On the button: only it is ever EDITED; the label takes the colour. */
-    lv_obj_set_style_text_color(s_tempoItem, kText, 0);
-    lv_obj_set_style_text_color(s_tempoItem, kInk, LV_STATE_EDITED);
-    lv_obj_set_style_outline_color(s_tempoItem, kHead, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(s_tempoItem, 2, LV_STATE_FOCUS_KEY);
-    lv_obj_t* l = lv_label_create(s_tempoItem);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-    lv_obj_center(l);
+    song_window(name.c_str(), [](lv_event_t*) { close_overlay(); project_cb(nullptr); });
+    list_note(summary.c_str());
+    /* Turned like MOVE: click, turn, click. */
+    s_tempoItem = list_row("Tempo", "", nullptr, nullptr, lv_CreateEditableButton(s_songList));
     lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_KEY, nullptr);
     lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_CLICKED, nullptr);
-#ifdef ARR_USE_ENCODER
-    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s_tempoItem);
-#endif
     show_tempo();
-    lv_obj_t* hint = lv_label_create(s_overlay);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, kDim, 0);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(hint, LV_PCT(100));
-    lv_label_set_text(hint, "Click, turn, click to set. Clips keep their speed: each block is resized to "
-                            "what its file lasts at the new tempo. SYNC plays the sequencer at this tempo.");
-    overlay_item(LV_SYMBOL_EDIT " Rename", rename_cb, nullptr);
-    overlay_item(LV_SYMBOL_TRASH " Delete song", delete_cb, nullptr);
-    overlay_item(LV_SYMBOL_OK " Done", [](lv_event_t*) { close_overlay(); }, nullptr, true);
+    list_row("Name", (name + "  " LV_SYMBOL_RIGHT).c_str(), rename_cb);
+    list_row("Export to Ableton Live", ".als  " LV_SYMBOL_RIGHT, export_cb);
+    lv_obj_t* del = list_row("Delete song", LV_SYMBOL_RIGHT, delete_cb);
+    lv_obj_set_style_text_color(del, kMute, 0);
+    list_note("Tempo: click, turn, click. Clips keep their speed -- each block is resized to what its "
+              "file lasts at the new tempo. SYNC plays the sequencer at it.");
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(s_tempoItem);
+#endif
+}
+
+/// Open project @p i of the list, or a new "Song N" with -1.
+void pick_project(int i)
+{
+    auto* se = engine();
+    std::string name;
+    if (i < 0) {
+        /* "Song N", the first N not taken. */
+        for (int n = 1; n < 1000; ++n) {
+            name = "Song " + std::to_string(n);
+            bool taken = false;
+            for (const auto& p : s_projects) if (p == name) { taken = true; break; }
+            if (!taken) break;
+        }
+    } else if (i < (int)s_projects.size()) {
+        name = s_projects[i];
+    }
+    close_overlay();
+    if (!se || name.empty()) return;
+    s_selTrack = 0;
+    s_selIndex = -1;
+    s_opening = se->requestOpen(name);
+    if (s_opening && s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Opening %s ...", name.c_str());
+}
+
+void project_pick_cb(lv_event_t* e) { pick_project((int)(intptr_t)lv_event_get_user_data(e)); }
+
+/// "+ NEW" is in the header from the start, but a new name is only known
+/// once the list is: until then it does nothing.
+void new_song_cb(lv_event_t*)
+{
+    if (s_pending != Pending::Projects) pick_project(-1);
 }
 
 void request_list(Pending what, const char* title)
@@ -1247,32 +1442,50 @@ void request_list(Pending what, const char* title)
     if (!se || s_overlay) return;
     s_pendingGen = se->listGeneration();
     const bool asked = what == Pending::Projects ? se->requestProjects() : se->requestClips();
-    overlay_list(title);
-    s_loading = lv_label_create(s_overlay);
-    lv_obj_set_style_text_color(s_loading, kDim, 0);
-    lv_label_set_text(s_loading, asked ? "Reading the card ..." : "The card is busy, try again.");
+    const char* wait = asked ? "Reading the card ..." : "The card is busy, try again.";
+    if (what == Pending::Projects) {
+        song_window(title, cancel_cb, LV_SYMBOL_PLUS " NEW", new_song_cb);
+        s_loading = list_note(wait, &lv_font_montserrat_14);
+    } else {
+        overlay_list(title);
+        s_loading = lv_label_create(s_overlay);
+        lv_obj_set_style_text_color(s_loading, kDim, 0);
+        lv_label_set_text(s_loading, wait);
+        if (!asked) overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+    }
     s_pending = asked ? what : Pending::None;
-    if (!asked) overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
 }
 
+/// The songs on the card, the open one marked and first to the encoder: a
+/// click on it edits it, on any other opens that one.
 void fill_projects()
 {
-    auto* se = engine();
-    s_projects = se->projects();
-    std::string current;
-    {
-        std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        current = se->song().name;
-    }
-    if (!current.empty()) {
-        const std::string edit = std::string(LV_SYMBOL_SETTINGS " Edit \"") + current + "\"  (tempo, name, delete)";
-        overlay_item(edit.c_str(), song_edit_cb, nullptr);
-    }
-    overlay_item(LV_SYMBOL_PLUS " New song", project_pick_cb, (void*)(intptr_t)-1, true);
+    s_projects = engine()->projects();
+    const std::string current = open_song_name();
+    lv_obj_t* focus = nullptr;
     for (size_t i = 0; i < s_projects.size() && i < 24; ++i) {
-        overlay_item(s_projects[i].c_str(), project_pick_cb, (void*)(intptr_t)i);
+        const bool open = s_projects[i] == current;
+        lv_obj_t* r = list_row(s_projects[i].c_str(), open ? "EDIT  " LV_SYMBOL_RIGHT : nullptr,
+                               open ? song_edit_cb : project_pick_cb, (void*)(intptr_t)i);
+        if (!open) continue;
+        lv_obj_set_style_border_side(r, LV_BORDER_SIDE_LEFT, 0);
+        lv_obj_set_style_border_color(r, kAccent, 0);
+        lv_obj_set_style_border_width(r, 3, 0);
+        lv_obj_t* v = lv_obj_get_child(r, 1);
+        lv_obj_set_style_text_color(v, kAccent, 0);
+        lv_obj_set_style_text_opa(v, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_font(v, &lv_font_montserrat_10, 0);
+        focus = r;
     }
-    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+    if (s_projects.empty()) list_note("No songs on the card yet: + NEW starts one.", &lv_font_montserrat_14);
+    if (!focus) return;
+    /* Laid out first: the rows were made this tick and all still sit at the
+     * top, so scrolling to one would not move the list. */
+    lv_obj_update_layout(s_overlay);
+    lv_obj_scroll_to_view(focus, LV_ANIM_OFF);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(focus);
+#endif
 }
 
 void project_cb(lv_event_t*)
