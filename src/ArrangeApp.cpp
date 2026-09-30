@@ -49,6 +49,7 @@
 #include "crosspad/app/AppRegistrar.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 #include "crosspad/song/ISongEngine.hpp"
+#include "crosspad-gui/components/status_bar.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
 
 #include "lvgl.h"
@@ -884,8 +885,8 @@ void set_move_axis(MoveAxis a)
     s_moveAxis = a;
     if (s_tools[0]) {
         lv_label_set_text(lv_obj_get_child(s_tools[0], 0),
-                          a == MoveAxis::Bars   ? LV_SYMBOL_LEFT " BAR " LV_SYMBOL_RIGHT :
-                          a == MoveAxis::Tracks ? LV_SYMBOL_UP " TRK " LV_SYMBOL_DOWN : "MOVE");
+                          a == MoveAxis::Bars   ? LV_SYMBOL_LEFT "  " LV_SYMBOL_RIGHT :
+                          a == MoveAxis::Tracks ? LV_SYMBOL_UP "  " LV_SYMBOL_DOWN : "MOVE");
     }
     place_move_arrows();
 }
@@ -2024,6 +2025,15 @@ void edit_cb(lv_event_t*)
 
 // ── building ───────────────────────────────────────────────────────────────
 
+/// Focus as a frame inside the button: the theme's ring stands 4 px out of it,
+/// and a row the button fills cuts that off at the top and bottom.
+void focus_frame(lv_obj_t* b)
+{
+    lv_obj_set_style_outline_width(b, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_color(b, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_width(b, 2, LV_STATE_FOCUS_KEY);
+}
+
 lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb_t cb, void* ud = nullptr)
 {
     lv_obj_t* b = lv_button_create(parent);
@@ -2032,14 +2042,22 @@ lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb
     lv_obj_set_style_radius(b, 6, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_bg_color(b, kPanel, 0);
-    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+    focus_frame(b);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
     lv_obj_t* l = lv_label_create(b);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(l, kText, 0);
     lv_label_set_text(l, text);
     lv_obj_center(l);
+    return b;
+}
+
+/// A tool at the foot of the screen: the row's height, the larger font.
+lv_obj_t* tool_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb_t cb)
+{
+    lv_obj_t* b = make_button(parent, w, text, cb);
+    lv_obj_set_height(b, LV_PCT(100));
+    lv_obj_set_style_text_font(lv_obj_get_child(b, 0), &lv_font_montserrat_14, 0);
     return b;
 }
 
@@ -2298,44 +2316,41 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_set_scroll_dir(s_timeline, LV_DIR_HOR);
     lv_obj_set_scrollbar_mode(s_timeline, LV_SCROLLBAR_MODE_OFF);
 
-    s_infoLabel = lv_label_create(s_root);
-    lv_obj_set_style_text_font(s_infoLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(s_infoLabel, kDim, 0);
-    lv_label_set_long_mode(s_infoLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_infoLabel, LV_PCT(100));
+    /* The status line is the status bar's centre, in place of the logo: the
+     * row it took here went to the tools. */
+    s_infoLabel = crosspad_gui::statusbar_show_title();
 
-    // -- tools on the selected block --
+    /* -- tools on the selected block --: as tall as the screen leaves them,
+     * a finger's worth, each as wide as its word in the larger font. */
     lv_obj_t* tools = make_row(s_root, 24);
-    lv_obj_set_style_pad_column(tools, 3, 0);
+    lv_obj_set_flex_grow(tools, 1);
+    lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(tools, 0, 0);
     s_tools[0] = lv_CreateEditableButton(tools);
-    lv_obj_set_size(s_tools[0], 44, 22);
+    lv_obj_set_size(s_tools[0], 48, LV_PCT(100));
     lv_obj_set_style_pad_all(s_tools[0], 0, 0);
     lv_obj_set_style_radius(s_tools[0], 6, 0);
     lv_obj_set_style_shadow_width(s_tools[0], 0, 0);
     lv_obj_set_style_bg_color(s_tools[0], kPanel, 0);
     lv_obj_set_style_bg_color(s_tools[0], kAccent, LV_STATE_EDITED);
     lv_obj_set_style_text_color(s_tools[0], kInk, LV_STATE_EDITED);   // the label takes it from here
-    lv_obj_set_style_outline_color(s_tools[0], kHead, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(s_tools[0], 2, LV_STATE_FOCUS_KEY);
+    focus_frame(s_tools[0]);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_KEY, nullptr);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_event_cb(s_tools[0], move_cb, LV_EVENT_FOCUSED, nullptr);
     {
         lv_obj_t* l = lv_label_create(s_tools[0]);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
         lv_label_set_text(l, "MOVE");
         lv_obj_center(l);
     }
-    s_tools[1] = make_button(tools, 34, "DUP", dup_cb);
-    s_tools[2] = make_button(tools, 34, "DEL", del_cb);
-    lv_obj_t* gap = lv_obj_create(tools);
-    lv_obj_remove_style_all(gap);
-    lv_obj_set_size(gap, 4, 1);
-    s_tools[3] = make_button(tools, 42, LV_SYMBOL_PLUS " ADD", add_cb);
-    s_tools[4] = make_button(tools, 36, "EDIT", edit_cb);
-    s_tools[5] = make_button(tools, 34, "MIX", mix_cb);
-    s_tools[6] = make_button(tools, 28, "Z-", zoom_out_cb);
-    s_tools[7] = make_button(tools, 28, "Z+", zoom_in_cb);
+    s_tools[1] = tool_button(tools, 36, "DUP", dup_cb);
+    s_tools[2] = tool_button(tools, 34, "DEL", del_cb);
+    s_tools[3] = tool_button(tools, 38, "ADD", add_cb);
+    s_tools[4] = tool_button(tools, 38, "EDIT", edit_cb);
+    s_tools[5] = tool_button(tools, 34, "MIX", mix_cb);
+    s_tools[6] = tool_button(tools, 30, "Z-", zoom_out_cb);
+    s_tools[7] = tool_button(tools, 30, "Z+", zoom_in_cb);
 #ifdef ARR_USE_ENCODER
     s_toolGroup = lv_group_create();
     for (int t = 0; t < kBlockTools; ++t) lv_group_add_obj(s_toolGroup, s_tools[t]);
@@ -2359,7 +2374,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     s_shape = 0;
     rebuild_timeline();
     sync_transport();
-    if (!engine()) lv_label_set_text(s_infoLabel, "No song engine on this platform.");
+    if (!engine() && s_infoLabel) lv_label_set_text(s_infoLabel, "No song engine on this platform.");
 
 #ifdef ARR_USE_ENCODER
     if (s_encGroup) lv_group_focus_obj(s_playBtn);
@@ -2370,12 +2385,17 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     if (app) {
         app->setOnBack(back_handler);
         app->setOnShow([](lv_obj_t*) {
+            s_infoLabel = crosspad_gui::statusbar_show_title();
+            update_info();
             if (s_timer) lv_timer_resume(s_timer);
 #ifdef ARR_USE_ENCODER
             if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
         });
         app->setOnHide([](lv_obj_t*) {
+            /* The bar goes back to the logo for whatever comes next. */
+            crosspad_gui::statusbar_hide_title();
+            s_infoLabel = nullptr;
             if (s_timer) lv_timer_pause(s_timer);
 #ifdef ARR_USE_ENCODER
             if (indev_encoderTop && s_prevEncGroup) lv_indev_restore_group(indev_encoderTop, s_prevEncGroup);
@@ -2418,6 +2438,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& h : s_heads) h = nullptr;
     for (auto& t : s_tools) t = nullptr;
     s_blockCount = 0;
+    crosspad_gui::statusbar_hide_title();
     s_root = s_timeline = s_playhead = s_projLabel = s_posLabel = s_infoLabel = nullptr;
     s_playBtn = s_loopBtn = s_syncBtn = s_backBtn = s_projBtn = nullptr;
 
