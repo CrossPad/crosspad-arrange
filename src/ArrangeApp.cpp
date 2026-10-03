@@ -57,6 +57,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -72,6 +73,33 @@ extern "C" {
 #endif
 
 namespace {
+
+/* ── set_text_fmt() is not used here, and this is why ─────────────
+ *
+ * It frees the label's old text and allocates the new one, but it does not
+ * revert the dots of a truncated label first -- lv_label_set_text() does
+ * exactly that, one line in, "in case text == label->text". So when a long
+ * line is replaced by a shorter one, LVGL still holds the offset the dots were
+ * written at, and on the next refresh it puts the four saved characters back at
+ * that offset -- past the end of the new, shorter buffer. The heap block next
+ * door loses its tail canary, and the crash lands minutes later on whatever
+ * frees that block: an assert deep inside LVGL, with nothing in the backtrace
+ * to say who wrote the bytes. It read as "Arrange crashes when I click a
+ * block", because this screen is the one that formats a line of changing length
+ * on every click.
+ *
+ * Formatting it ourselves and handing lv_label_set_text() a finished string is
+ * both the safe way and what every other screen in this firmware does. */
+static void set_text_fmt(lv_obj_t* label, const char* fmt, ...)
+{
+    if (!label || !fmt) return;
+    char buf[160];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    lv_label_set_text(label, buf);
+}
 
 constexpr int      kTracks   = crosspad::AudioSong::kTracks;
 /* Zoom: pixels per bar, from a whole song on one screen to single beats. */
@@ -95,6 +123,11 @@ const lv_color_t kDim    = lv_color_hex(0x7B828B);
 const lv_color_t kInk    = lv_color_hex(0x16181B);
 const lv_color_t kAccent = lv_color_hex(0xC6FF47);
 const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
+/* A block whose audio is not on the card: grey, and it says so on itself. Not
+ * red -- nothing is broken, the song remembers what it played and the file did
+ * not travel with it -- and not the clip's own colour either, because a block
+ * that looks like the others is read as one that plays. */
+const lv_color_t kMissing = lv_color_hex(0x6E757E);
 const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
 const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
 
@@ -121,6 +154,7 @@ struct Block {
     bool        muted = false;
     std::shared_ptr<const std::vector<uint8_t>> peaks;
     uint8_t     peakMax = 0;       ///< the loudest value: the waveform is drawn to it
+    bool        missing = false;   ///< its file is not in the project's clips folder
 };
 
 lv_obj_t* s_root = nullptr;
@@ -300,7 +334,23 @@ void set_peaks(Block& b, const crosspad::ClipPeaks& cp)
 {
     b.peaks = cp.values;
     b.peakMax = cp.values && !cp.values->empty() ? *std::max_element(cp.values->begin(), cp.values->end()) : 0;
+    b.missing = cp.missing;
     s_peakHop = cp.hop;
+    /* A block with nothing behind it goes grey and says MISSING on itself,
+     * rather than looking like a clip that happens to be silent -- which is how
+     * a song whose audio did not travel with it reads as a bug in the
+     * sequencer. The name is not lost: selecting the block puts it in the line
+     * underneath, where there is room for it. */
+    if (b.missing && b.obj) {
+        lv_obj_set_style_bg_color(b.obj, kMissing, 0);
+        lv_obj_set_style_bg_opa(b.obj, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(b.obj, 1, 0);
+        lv_obj_set_style_border_color(b.obj, kBg, 0);
+        if (lv_obj_t* l = lv_obj_get_child(b.obj, 0)) {
+            lv_obj_set_style_text_color(l, kBg, 0);
+            lv_label_set_text(l, "MISSING");
+        }
+    }
 }
 
 /// The waveforms that have come in since the blocks were drawn.
@@ -324,6 +374,15 @@ void paint_block(const Block& b)
     lv_obj_set_style_outline_pad(b.obj, 1, 0);
 }
 
+/// Whether the block standing for track @p tr's clip @p idx has no file.
+bool block_missing(int tr, int idx)
+{
+    for (int i = 0; i < s_blockCount; ++i) {
+        if (s_blocks[i].track == tr && s_blocks[i].index == idx) return s_blocks[i].missing;
+    }
+    return false;
+}
+
 void update_info()
 {
     auto* se = engine();
@@ -331,7 +390,7 @@ void update_info()
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     const auto& song = se->song();
     if (s_regionEdit != RegionEdit::None) {
-        lv_label_set_text_fmt(s_infoLabel, "Loop region: bars %u - %u   |   turn to move %s, click for %s",
+        set_text_fmt(s_infoLabel, "Loop region: bars %u - %u   |   turn to move %s, click for %s",
                               (unsigned)(song.loopStart + 1), (unsigned)song.loopEnd,
                               s_regionEdit == RegionEdit::Start ? "L" : "R",
                               s_regionEdit == RegionEdit::Start ? "R" : "done");
@@ -340,13 +399,20 @@ void update_info()
     const auto& cs = song.tracks[s_selTrack].clips;
     if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) {
         const auto& c = cs[s_selIndex];
-        lv_label_set_text_fmt(s_infoLabel, "T%d  %s  -  bar %u, %u bars   |   %d bpm",
+        /* The name first and the reason plainly: a block whose file is gone is
+         * the one thing on this screen that cannot be fixed on this screen. */
+        if (block_missing(s_selTrack, s_selIndex)) {
+            set_text_fmt(s_infoLabel, "%s  -  NOT IN clips/   |   bar %u, %u bars",
+                                  short_name(c.file).c_str(), (unsigned)(c.bar + 1), (unsigned)c.bars);
+            return;
+        }
+        set_text_fmt(s_infoLabel, "T%d  %s  -  bar %u, %u bars   |   %d bpm",
                               s_selTrack + 1, short_name(c.file).c_str(), (unsigned)(c.bar + 1),
                               (unsigned)c.bars, (int)lroundf(song.bpm));
     } else if (song.playEnd() == 0) {
         lv_label_set_text(s_infoLabel, "Empty song -- BOUNCE a scene in the Sequencer, or ADD a clip");
     } else {
-        lv_label_set_text_fmt(s_infoLabel, "Track %d selected   |   %d bpm   |   %u bars%s", s_selTrack + 1,
+        set_text_fmt(s_infoLabel, "Track %d selected   |   %d bpm   |   %u bars%s", s_selTrack + 1,
                               (int)lroundf(song.bpm), (unsigned)song.playEnd(), song.length ? "" : " (auto)");
     }
 }
@@ -446,7 +512,7 @@ void rebuild_timeline()
             lv_obj_t* num = lv_label_create(s_timeline);
             lv_obj_set_style_text_font(num, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(num, kDim, 0);
-            lv_label_set_text_fmt(num, "%u", (unsigned)(bar + 1));
+            set_text_fmt(num, "%u", (unsigned)(bar + 1));
             lv_obj_set_pos(num, (int32_t)bar * s_pxPerBar + 2, -2);
         }
     }
@@ -1303,7 +1369,7 @@ int32_t   s_editBpm = 120;          // the tempo being dialled, applied on the c
 void show_tempo()
 {
     if (!s_tempoItem) return;
-    lv_label_set_text_fmt(lv_obj_get_child(s_tempoItem, 1), "%03d BPM", (int)s_editBpm);
+    set_text_fmt(lv_obj_get_child(s_tempoItem, 1), "%03d BPM", (int)s_editBpm);
 }
 
 void song_edit_cb(lv_event_t*);
@@ -1373,7 +1439,7 @@ void rename_done_cb(lv_event_t* e)
     if (!se->requestRename(name)) { rename_failed(); return; }
     s_editing = true;
     s_editKind = EditKind::Rename;
-    if (s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Renaming to %s ...", name.c_str());
+    if (s_infoLabel) set_text_fmt(s_infoLabel, "Renaming to %s ...", name.c_str());
 }
 
 void rename_cb(lv_event_t*)
@@ -1530,7 +1596,7 @@ void pick_project(int i)
     s_selTrack = 0;
     s_selIndex = -1;
     s_opening = se->requestOpen(name);
-    if (s_opening && s_infoLabel) lv_label_set_text_fmt(s_infoLabel, "Opening %s ...", name.c_str());
+    if (s_opening && s_infoLabel) set_text_fmt(s_infoLabel, "Opening %s ...", name.c_str());
 }
 
 void project_pick_cb(lv_event_t* e) { pick_project((int)(intptr_t)lv_event_get_user_data(e)); }
@@ -1654,9 +1720,9 @@ void show_length()
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     const auto& song = se->song();
     if (song.length) {
-        lv_label_set_text_fmt(s_lenLabel, "%u bars", (unsigned)song.length);
+        set_text_fmt(s_lenLabel, "%u bars", (unsigned)song.length);
     } else {
-        lv_label_set_text_fmt(s_lenLabel, "%u bars  (auto: to the last block)", (unsigned)song.songEnd());
+        set_text_fmt(s_lenLabel, "%u bars  (auto: to the last block)", (unsigned)song.songEnd());
     }
 }
 
@@ -1957,7 +2023,7 @@ void merge_tracks_cb(lv_event_t*)
         lv_obj_add_event_cb(b, merge_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
         lv_obj_t* l = lv_label_create(b);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
-        lv_label_set_text_fmt(l, "%d", t + 1);
+        set_text_fmt(l, "%d", t + 1);
         lv_obj_center(l);
 #ifdef ARR_USE_ENCODER
         if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, b);
@@ -2163,7 +2229,7 @@ void mix_strip(lv_obj_t* strips, int t, float volume)
     lv_obj_t* num = lv_label_create(strip);
     lv_obj_set_style_text_font(num, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(num, kText, 0);
-    lv_label_set_text_fmt(num, "%d", t + 1);
+    set_text_fmt(num, "%d", t + 1);
 
     /* Taller than wide: LVGL makes it a vertical slider, the bottom its 0. */
     lv_obj_t* s = lv_slider_create(strip);
@@ -2299,7 +2365,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_t* l = lv_label_create(h);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(l, kText, 0);
-        lv_label_set_text_fmt(l, "%d", t + 1);
+        set_text_fmt(l, "%d", t + 1);
         lv_obj_center(l);
         s_heads[t] = h;
     }
