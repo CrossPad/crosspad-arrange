@@ -2697,6 +2697,7 @@ void choose_audio_cb(lv_event_t*)
     crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
     f.clear();
     f.track = made;
+    f.bar = playhead_bar();      // the take, with the song, starts there
     if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
         f.clear();
         note_fmt("Track %d added. No Recorder in this firmware -- EDIT it to add a clip.", made + 1);
@@ -3013,6 +3014,7 @@ void edit_track_cb(lv_event_t*)
     crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
     f.clear();
     f.track = s_selTrack;
+    f.bar = playhead_bar();
     if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
         f.clear();
         note("No Recorder in this firmware. EDIT adds a clip from the library.");
