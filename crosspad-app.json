@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=1.17.0"
   },
   "changelog": [
+    "0.10.0: a Pitch track opens in Pitch Play -- the same screen as the MODE map's Pitch -- instead of the seq grid; a kit track still opens the seq view. The 'plays with' sheet says so.",
     "0.9.0: the status line sits in the status bar, centred where the CrossPad logo was (gui 1.17 statusbar_show_title), and the row it took goes to the tools at the foot: as tall as the screen leaves them, in the larger font, spread across the width; MOVE reads its axis as two arrows; requires gui 1.17",
     "0.8.0: every block shows its clip's waveform under its name, at the speed it plays -- a file shorter than its block ends early, one made at another tempo shows where its beats fall; read from the card while nothing plays, once, and kept in the song's .peaks/ (core 1.34 clipPeaks); requires core 1.34",
     "0.7.0: the song window exports the song to Ableton Live 12: <name>.als in the song's folder, which becomes a Live project -- four tracks, every block a clip on its bars at the song's tempo, faders, mutes and loop carried over; a report says what was left out; the songs list and the song window are lists under a header whose left end is the way back -- the open song marked, a click on it edits it, + NEW at the top, the song's settings a row each; requires core 1.33",

@@ -2740,7 +2740,10 @@ void choose_source_cb(lv_event_t* e)
     open_seq_track(made);
 }
 
-/// The sequencer, on this track's scene and knowing it came from here.
+/// A seq track's screen, on its scene and knowing it came from here: a Pitch
+/// track opens in Pitch Play -- the very screen the MODE map's Pitch opens,
+/// which takes the transport for this scene so REC and DUB record what is
+/// played on its keys -- and a kit track in the sequencer's seq view.
 void open_seq_track(int track)
 {
     auto* se = engine();
@@ -2769,9 +2772,10 @@ void open_seq_track(int track)
     }
     if (moved) se->commit();
     if (sq) sq->selectScene(f.scene);
-    if (!crosspad_gui::mode_overlay_open_app("Sequencer")) {
+    const bool pitch = f.source == crosspad::SeqSource::Pitch;
+    if (!crosspad_gui::mode_overlay_open_app(pitch ? "PitchPlay" : "Sequencer")) {
         f.clear();
-        note("No sequencer in this firmware.");
+        note(pitch ? "No Pitch Play in this firmware." : "No sequencer in this firmware.");
     }
 }
 
@@ -2830,7 +2834,7 @@ void seq_source_sheet()
     sheet_card(164, "PITCH PLAY", "Pitch", "one sample in pitch:", "bass, keys, melody",
                kPitchT, true, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Pitch);
 
-    sheet_rules("EDIT in the seq opens the Sampler or Pitch Play.",
+    sheet_rules("Pitch opens Pitch Play; Kit opens the seq view.",
                 "Bounce turns the seq into audio and frees the slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
