@@ -4135,7 +4135,7 @@ void Arrange_destroy(lv_obj_t* root)
     s_prevEncGroup = nullptr;
 #endif
 
-    lv_obj_delete_async(root);
+    if (root) lv_obj_delete_async(root);
 }
 
 // No pad logic of its own: the pads play the kit over the song, or a Pitch
