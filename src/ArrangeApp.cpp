@@ -68,11 +68,11 @@
 #if __has_include("pc_stubs/PcApp.hpp")
   #include "pc_stubs/PcApp.hpp"
 #else
-  #include "crosspad-gui/components/transport_bar.h"
-#include "crosspad-gui/components/ui_toast.h"
-#include "crosspad-gui/app/App.hpp"
+  #include "crosspad-gui/app/App.hpp"
 #endif
 
+#include "crosspad-gui/components/transport_bar.h"
+#include "crosspad-gui/components/ui_toast.h"
 #include "crosspad/app/AppRegistrar.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 /* A seq track names a sequencer scene: this screen reads its bars and notes

@@ -19,3 +19,7 @@ plays at the speed it was recorded.
 The engine behind it is `crosspad::ISongEngine` (crosspad-core), reached
 through `PlatformServices::songEngine`; the ESP-IDF implementation is
 `components/crosspad-platform-idf/SongEnginePort.cpp`.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE).
