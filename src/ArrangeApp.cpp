@@ -249,6 +249,10 @@ lv_obj_t* s_posLabel = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
 lv_obj_t* s_editBtn = nullptr;   ///< the timeline's EDIT, beside SYNC
+lv_obj_t* s_followBtn = nullptr; ///< FOLLOW: the timeline keeps the playhead in view while playing
+/* Kept across openings of the screen, as the player left it: on, the lanes
+ * scroll with the song; off, they stay put for editing while it plays. */
+bool      s_follow = true;
 lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
@@ -739,6 +743,7 @@ void rebuild_group()
     lv_obj_t* focused = lv_group_get_focused(s_encGroup);
     lv_group_remove_all_objs(s_encGroup);
     lv_group_add_obj(s_encGroup, s_projBtn);
+    lv_group_add_obj(s_encGroup, s_followBtn);
     lv_group_add_obj(s_encGroup, s_editBtn);
     lv_group_add_obj(s_encGroup, s_syncBtn);
     lv_group_add_obj(s_encGroup, s_loopBtn);
@@ -1095,6 +1100,8 @@ void sync_transport()
     set_ink(lv_obj_get_child(s_loopBtn, 0), loop ? kInk : kDim);
     set_bg(s_syncBtn, sync ? kAccent : kPanel);
     set_ink(lv_obj_get_child(s_syncBtn, 0), sync ? kInk : kDim);
+    set_bg(s_followBtn, s_follow ? kAccent : kPanel);
+    set_ink(lv_obj_get_child(s_followBtn, 0), s_follow ? kInk : kDim);
 }
 
 /// The meters beside the lanes, from what each track is playing: straight
@@ -1280,9 +1287,12 @@ void tick_cb(lv_timer_t*)
     set_bg(s_playhead, se->seqTake() != crosspad::SyncTake::None ? kRec : kHead);
     if (lv_obj_has_flag(s_playhead, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_playhead, LV_OBJ_FLAG_HIDDEN);
     if (lv_obj_get_x(s_playhead) != x) lv_obj_set_pos(s_playhead, x, 0);
-    std::snprintf(buf, sizeof(buf), "bar %d / %u", (int)pos + 1, (unsigned)total);
+    std::snprintf(buf, sizeof(buf), "bar %d/%u", (int)pos + 1, (unsigned)total);
     set_text(s_posLabel, buf);
 
+    /* FOLLOW off: the lanes stay where the player put them, and the playhead
+     * may run off them. */
+    if (!s_follow) return;
     const int32_t view = lv_obj_get_content_width(s_timeline);
     const int32_t left = lv_obj_get_scroll_x(s_timeline);
     if (x < left || x > left + view * 2 / 3) {
@@ -1664,6 +1674,21 @@ void loop_cb(lv_event_t*)
     }
     se->commit();
     sync_transport();
+}
+
+/// FOLLOW: the lanes scroll with the playhead while the song plays, or stay
+/// put so a block can be edited while it does. Turned back on, they go to
+/// the playhead at once.
+void follow_cb(lv_event_t*)
+{
+    s_follow = !s_follow;
+    sync_transport();
+    auto* se = engine();
+    if (!s_follow || !se || !s_timeline) return;
+    const double at = se->playing() ? se->positionBars() : (double)crosspad::songTransport().startBar();
+    const int32_t x = (int32_t)(at * s_pxPerBar);
+    const int32_t view = lv_obj_get_content_width(s_timeline);
+    lv_obj_scroll_to_x(s_timeline, x > view / 3 ? x - view / 3 : 0, LV_ANIM_ON);
 }
 
 /// The sequencer along with the song, from the next Play on: started with
@@ -3713,11 +3738,11 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * No back button and no PLAY: back is the power button's click, and the
      * transport is the bar above. ZOOM takes the place the two zoom keys had
      * on the tool row, which is where the export puts it. */
-    s_projBtn = make_button(s_root, 72, "", project_cb);
+    s_projBtn = make_button(s_root, 54, "", project_cb);
     place(s_projBtn, 6, ARR_Y(35));
     s_projLabel = lv_obj_get_child(s_projBtn, 0);
     lv_label_set_long_mode(s_projLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_projLabel, 66);
+    lv_obj_set_width(s_projLabel, 48);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
     /* The export's dim "18 bars". It carries this screen's status line too:
@@ -3726,8 +3751,8 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * those sentences are longer than the slot and the export leaves no row
      * for them. */
     s_posLabel = lv_label_create(s_root);
-    lv_obj_set_width(s_posLabel, 46);
-    place(s_posLabel, 82, ARR_Y(40));
+    lv_obj_set_width(s_posLabel, 42);
+    place(s_posLabel, 63, ARR_Y(40));
     lv_obj_set_style_text_font(s_posLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_posLabel, kDim, 0);
     lv_obj_set_style_text_align(s_posLabel, LV_TEXT_ALIGN_RIGHT, 0);
@@ -3741,14 +3766,18 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     /* EDIT here is the timeline's: the loop region, copy / paste, merging,
      * the song's length, a clip from the library (edit_cb). The key at the
      * foot is the clip's (clip_edit_cb). */
-    s_editBtn = make_button(s_root, 40, "EDIT", edit_cb);
-    place(s_editBtn, 132, ARR_Y(35));
-    s_syncBtn = make_button(s_root, 44, "SYNC", sync_cb);
-    place(s_syncBtn, 176, ARR_Y(35));
-    s_loopBtn = make_button(s_root, 44, "LOOP", loop_cb);
-    place(s_loopBtn, 224, ARR_Y(35));
-    s_zoomBtn = make_button(s_root, 42, "ZOOM", zoom_cycle_cb);
-    place(s_zoomBtn, 272, ARR_Y(35));
+    /* FOLLOW beside the position it follows; the keys after it a little
+     * narrower than the export's, to make the room. */
+    s_followBtn = make_button(s_root, 42, "FOLLOW", follow_cb);
+    place(s_followBtn, 108, ARR_Y(35));
+    s_editBtn = make_button(s_root, 36, "EDIT", edit_cb);
+    place(s_editBtn, 153, ARR_Y(35));
+    s_syncBtn = make_button(s_root, 40, "SYNC", sync_cb);
+    place(s_syncBtn, 192, ARR_Y(35));
+    s_loopBtn = make_button(s_root, 40, "LOOP", loop_cb);
+    place(s_loopBtn, 235, ARR_Y(35));
+    s_zoomBtn = make_button(s_root, 38, "ZOOM", zoom_cycle_cb);
+    place(s_zoomBtn, 278, ARR_Y(35));
 
     /* ── lanes: the track buttons fixed, the timeline scrolling beside them ──
      * The export's LANE_X=48 and a lane block from screen y=62 to 200. */
@@ -4095,7 +4124,7 @@ void Arrange_destroy(lv_obj_t* root)
     s_blockCount = 0;
     /* the status line went with the screen */
     s_root = s_timeline = s_playhead = s_projLabel = s_posLabel = nullptr;
-    s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = nullptr;
+    s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_prevEncGroup) lv_indev_restore_group(indev_encoderTop, s_prevEncGroup);
