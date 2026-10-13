@@ -1604,8 +1604,11 @@ void leave_region_edit();
 void close_overlay();
 
 /// The power button's click goes back one step, and only one: a window, the
-/// loop region being turned, MOVE being turned, the keys a block opened, the
-/// block picked -- and out of the app only with none of them left. (The
+/// loop region being turned, MOVE being turned, the keys a block opened --
+/// and out of the app with none of them left. A block that is only picked is
+/// not a step: the encoder picks one by walking over it, the pick outlives
+/// the screen, and a click spent unpicking it showed nothing but a 2 px
+/// outline going, so getting out took two clicks or more (12.10.2026). (The
 /// encoder's edit mode and the top bar's focus are stepped out of before this
 /// is asked: powerBack().)
 bool back_handler(lv_obj_t*)
@@ -1621,10 +1624,6 @@ bool back_handler(lv_obj_t*)
          * step before this to have left: it stops here, the keys stay. */
         if (s_moveAxis != MoveAxis::None) { set_move_axis(MoveAxis::None); place_move_arrows(); return true; }
         leave_tools();
-        return true;
-    }
-    if (s_selIndex >= 0) {
-        select(s_selTrack, -1);
         return true;
     }
     return false;
@@ -3316,9 +3315,10 @@ void track_menu()
 /// CLIP EDIT: the selected track, in the app that makes it.
 ///
 /// A seq track opens the sequencer on its scene (a Pitch track Pitch Play,
-/// whose SEQ key leads on to the notes); an audio track opens the Recorder,
-/// to record into it. The timeline's editing is the EDIT beside SYNC
-/// (edit_cb).
+/// whose SEQ key leads on to the notes); an audio track opens the Recorder on
+/// the block picked -- or the one under the playhead -- to trim it and put it
+/// back where it was, or, on an empty bar, to record into the track. The
+/// timeline's editing is the EDIT beside SYNC (edit_cb).
 void clip_edit_cb(lv_event_t*)
 {
     auto* se = engine();
@@ -3332,10 +3332,16 @@ void clip_edit_cb(lv_event_t*)
     }
     if (!inUse) { note("Pick a track or a block first -- EDIT at the top edits the timeline."); return; }
     if (seq) { open_seq_track(s_selTrack); return; }
+    int pickedBar = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& cs = se->song().tracks[s_selTrack].clips;
+        if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) pickedBar = (int)cs[(size_t)s_selIndex].bar;
+    }
     crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
     f.clear();
     f.track = s_selTrack;
-    f.bar = playhead_bar();
+    f.bar = pickedBar >= 0 ? (uint32_t)pickedBar : playhead_bar();
     if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
         f.clear();
         note("No Recorder in this firmware. EDIT adds a clip from the library.");
