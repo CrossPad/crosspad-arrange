@@ -13,10 +13,16 @@
  * Audio tracks are laid out like a linear DAW: lanes, a bar ruler, every clip
  * a block as long as it plays, in a colour of its own, and a playhead while
  * the song runs -- and stopped, where PLAY starts, which the top bar's
- * position moves a bar a detent. A seq track is one block over the whole
- * song, drawn from the scene itself, because that is how long its pattern
- * plays -- until a cut or a region copy makes it blocks of its own, which are
- * then moved, cut and copied by bars like the audio (AudioSong seqBlocks).
+ * position moves a bar a detent. REC and DUB on the top bar record the pads
+ * onto the seq track from there (ISongEngine::recordSeq): a REC becomes a
+ * block of its own notes as many bars long as it ran -- the playhead then
+ * stands where it stopped, so the next REC is the next part -- and a DUB adds
+ * to the blocks it plays over; with LOOP over a region the take goes round
+ * it. Seq blocks are moved, copied (each copy its own from its first edit),
+ * cut and deleted by bars like the audio, and drawn from their notes. A seq
+ * track from before blocks had notes of their own plays its scene: one block
+ * over the whole song until a cut, a region copy or a take gives it blocks
+ * (AudioSong seqBlocks).
  *
  *   top    the project (tap: pick another or start a new one), where the song
  *          is, SYNC (the sequencer plays along, locked to the song's bars and
@@ -28,8 +34,8 @@
  *          MIX) -- the timeline beside them, and under the last of them
  *          "+ ADD TRACK" while there is room
  *   keys   MOVE, DUP and DEL act on the selected block; EDIT is the song's
- *          own editing (below). A long press on EDIT opens the selected track
- *          where it is made
+ *          own editing (below). CLIP EDIT opens the selected track where it
+ *          is made -- a seq block in the seq view, the block itself
  *   MIX    the four tracks' levels: a strip each side by side, as on a desk --
  *          a tall fader in dB (-inf, then 0.6 dB a step as in the Mixer app,
  *          unity at 90 %, +6 dB at the top), the dB, M; heard at once, saved
@@ -160,10 +166,12 @@ constexpr int32_t  kLaneH    = 30;     // the export's 31, less the ruler's pixe
  * does not have already pushes this block 14 px down; it must not also push
  * it into the keys. */
 constexpr int32_t  kLaneGap  = 2;
-/* 40, with the lanes still starting on the export's LANE_X 48: the header
- * carries a type badge under its number now, and "PITCH" at 10 px does not
- * fit 36. The 4 px it takes come off the gaps either side of it. */
-constexpr int32_t  kHeadW    = 40;
+/* 80: the export's track head, variant A -- the number in its type's colour
+ * over the name, S over M at the right edge. The lanes start on its LANE_X 88
+ * and end before the meters, on 302. */
+constexpr int32_t  kHeadW    = 80;
+constexpr int32_t  kMeterW   = 10;     ///< a track's stereo meter, beside the lanes
+constexpr int      kMeterSegs = 10;
 constexpr uint32_t kTickMs   = 50;
 constexpr int      kMaxBlocks = 64;
 /// Drawn blocks per track: a long track must not use up the ones the others need.
@@ -183,7 +191,10 @@ const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
  * that looks like the others is read as one that plays. */
 const lv_color_t kMissing = lv_color_hex(0x6E757E);
 const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+const lv_color_t kRec    = lv_color_hex(0xFF5C5C);     // the playhead while a take runs: REC's red
 const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
+const lv_color_t kWell   = lv_color_hex(0x1B1E22);     // S / M off, a meter's well
+const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
  * Arrange holds four tracks: four audio, or one seq and three audio. A track
@@ -216,10 +227,18 @@ struct Block {
     std::string file;
     uint32_t    offset = 0;        ///< where in the file it starts (a cut's second half)
     uint32_t    frames = 0;        ///< what it plays from there; 0 = to the end
+    uint32_t    bars = 0;          ///< how long the block is
+    bool        fitted = false;    ///< its track follows the tempo: the clip fills the bars
     bool        muted = false;
     std::shared_ptr<const std::vector<uint8_t>> peaks;
     uint8_t     peakMax = 0;       ///< the loudest value: the waveform is drawn to it
     bool        missing = false;   ///< its file is not in the project's clips folder
+    /* A seq block: its own notes, or -- null -- the track's scene, from its
+     * bar @c from of them. */
+    bool        seq = false;
+    crosspad::SeqPatternPtr notes;
+    uint8_t     scene = 0;
+    uint16_t    from = 0;
 };
 
 lv_obj_t* s_root = nullptr;
@@ -229,9 +248,25 @@ lv_obj_t* s_projLabel = nullptr;
 lv_obj_t* s_posLabel = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
+lv_obj_t* s_editBtn = nullptr;   ///< the timeline's EDIT, beside SYNC
+lv_obj_t* s_followBtn = nullptr; ///< FOLLOW: the timeline keeps the playhead in view while playing
+/* Kept across openings of the screen, as the player left it: on, the lanes
+ * scroll with the song; off, they stay put for editing while it plays. */
+bool      s_follow = true;
 lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
-lv_obj_t* s_headBadge[kTracks] = {};
+lv_obj_t* s_headName[kTracks] = {};
+lv_obj_t* s_headMute[kTracks] = {};
+lv_obj_t* s_headSolo[kTracks] = {};
+/// A track's stereo meter beside the lanes: its well, ten segments a side.
+lv_obj_t* s_meterWell[kTracks] = {};
+lv_obj_t* s_meterSeg[kTracks][2][kMeterSegs] = {};
+float     s_meterShown[kTracks][2] = {};
+uint8_t   s_meterLit[kTracks][2] = {};
+bool      s_trackQuiet[kTracks] = {};  ///< silenced: its meter stays down
+lv_obj_t* s_trackNameArea = nullptr;   ///< RENAME's field, while its sheet is up
+lv_obj_t* s_procBox = nullptr;         ///< "processing time stretch", over the lanes
+lv_obj_t* s_procLabel = nullptr;
 /* The row under the last track: the one way a track is made. It is drawn in
  * the slot the first track nobody has made would occupy, so the block of
  * lanes never grows past the four it is sized for. */
@@ -241,6 +276,11 @@ lv_obj_t* s_addInfo = nullptr;
  * see seq_draw_cb(). */
 lv_obj_t* s_seqBlock = nullptr;
 int       s_seqBlockTrack = -1;
+uint8_t   s_seqLaneScene = 0;      ///< the scene that lane plays
+/* Ticks in a bar of the open song (seq blocks' notes), and the bars the lanes
+ * are drawn over -- a take running past them redraws them longer. */
+uint32_t  s_seqTicksBar = crosspad::AudioSong::kSeqPpq * crosspad::AudioSong::kDefaultBeatsPerBar;
+uint32_t  s_drawnBars = 0;
 /* The track whose bounce is running, so its kind is flipped when the WAV
  * lands and not a moment before: until then the notes are still what plays. */
 int       s_bouncing = -1;
@@ -258,8 +298,9 @@ lv_obj_t* s_tools[4] = {};
 lv_obj_t* s_lenLabel = nullptr;     // the value in the LEN window
 lv_obj_t* s_zoomBtn = nullptr;   ///< the export puts zoom in the context row
 /* What PLAY in the transport bar drives while this screen is up, and where it
- * starts: the selection, which the bar cannot see. */
-crosspad::SongTransport s_transport;
+ * starts -- the selection, which the bar cannot see -- is the core's one song
+ * transport, crosspad::songTransport(): the seq view opened from the MODE map
+ * reads the same playhead. */
 lv_obj_t* s_projBtn = nullptr;
 lv_obj_t* s_overlay = nullptr;
 Block     s_blocks[kMaxBlocks];
@@ -357,6 +398,9 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     for (int t = 0; t < kTracks; ++t) {
         mix(0xABCDu + t);
         mix(s.tracks[t].muted);
+        mix(s.tracks[t].solo);
+        mix((uint32_t)s.tracks[t].stretch);       // a fitted block's waveform fills its bars
+        for (char c : s.tracks[t].name) mix((uint8_t)c);
         mix(s.tracks[t].inUse);
         mix((uint32_t)s.tracks[t].kind);
         mix((uint32_t)s.tracks[t].source);
@@ -364,6 +408,7 @@ uint32_t song_shape(const crosspad::AudioSong& s)
         mix(s.tracks[t].seqBlocks);
         for (const auto& c : s.tracks[t].clips) {
             mix(c.bar); mix(c.bars); mix(c.offset); mix(c.frames); mix(c.from);
+            mix((uint32_t)(uintptr_t)c.notes.get());   // a dub, the seq view: new notes, same bars
             for (char ch : c.file) mix((uint8_t)ch);
         }
     }
@@ -381,7 +426,9 @@ std::string short_name(const std::string& file)
 
 /// A block's waveform, under its name: the clip at the speed it plays, so a
 /// file shorter than its block ends early, and one made at another tempo
-/// shows where its beats really fall. Drawn to the clip's loudest value --
+/// shows where its beats really fall -- unless its track follows the tempo
+/// (stretch or repitch), when the clip fills the block's bars, as the copy
+/// that plays does. Drawn to the clip's loudest value --
 /// the lanes are too short for a quiet clip at full scale -- and only the
 /// bars in the area being redrawn.
 void block_draw_cb(lv_event_t* e)
@@ -406,10 +453,12 @@ void block_draw_cb(lv_event_t* e)
     d.color = b.muted ? kAudioT : kInk;
     d.opa = b.muted ? LV_OPA_70 : LV_OPA_60;
     const std::vector<uint8_t>& v = *b.peaks;
-    const double perPx = (double)s_framesPerBar / (double)s_pxPerBar / (double)s_peakHop;
     /* From where the block starts in its file, to a cut or the file's end. */
     const size_t skip = b.offset / s_peakHop;
     const size_t stop = b.frames ? std::min(v.size(), (size_t)((b.offset + b.frames) / s_peakHop)) : v.size();
+    const double perPx = b.fitted && b.bars
+        ? (double)(stop > skip ? stop - skip : 0) / ((double)b.bars * (double)s_pxPerBar)
+        : (double)s_framesPerBar / (double)s_pxPerBar / (double)s_peakHop;
     /* A bar is the loudest value under its whole pitch, so no hit falls in a
      * gap; one with sound in it is never less than the silence line. Past
      * the file's end there is nothing. */
@@ -426,26 +475,27 @@ void block_draw_cb(lv_event_t* e)
     }
 }
 
-/// A seq block's user data: its scene, and the bar of it the block starts on.
-void* seq_ud(uint8_t scene, uint32_t from) { return (void*)(intptr_t)(scene | (from << 8)); }
-
-/// A seq track's notes, over the bars the block plays.
+/// A seq block's notes, over the bars it plays.
 ///
-/// There is no file: the sequencer plays this track's scene along with the
-/// song, round and round -- over the whole song, or from a block's own bar of
-/// it under each block once it has been cut or copied -- so the pattern
-/// repeats inside the block. Drawn from the scene itself rather than from a
-/// picture of it, so a note recorded in the sequencer shows up here at once --
-/// and drawn in the draw event, like the waveforms, so only the bars on screen
-/// cost anything.
+/// There is no file: the sequencer plays the block's notes along with the
+/// song, round and round from the block's bar @c from of them -- its own
+/// (a take in Arrange, the seq view's edits), or, a block from before blocks
+/// had notes of their own, the track's scene, read from the sequencer so a
+/// note recorded there shows here at once. Drawn in the draw event, like the
+/// waveforms, so only the bars on screen cost anything. The user data is the
+/// block's index, or -1 for a track playing its scene over the whole song.
 void seq_draw_cb(lv_event_t* e)
 {
+    if (!s_pxPerBar) return;
+    const int k = (int)(intptr_t)lv_event_get_user_data(e);
+    if (k >= s_blockCount) return;
+    const crosspad::SeqPatternPtr own = k >= 0 ? s_blocks[k].notes : nullptr;
+    const uint8_t scene = k >= 0 ? s_blocks[k].scene : s_seqLaneScene;
+    const uint32_t from = k >= 0 ? s_blocks[k].from : 0;
     auto* sq = crosspad::getPlatformServices().sequencer;
-    if (!sq || !s_pxPerBar) return;
-    const uint32_t ud = (uint32_t)(intptr_t)lv_event_get_user_data(e);
-    const uint8_t scene = (uint8_t)(ud & 0xFF);
-    const uint8_t bars = sq->getSceneBars(scene);
-    const uint16_t n = sq->getSceneEventCount(scene);
+    if (!own && !sq) return;
+    const uint32_t bars = own ? own->bars : sq->getSceneBars(scene);
+    const uint32_t n = own ? (uint32_t)own->notes.size() : sq->getSceneEventCount(scene);
     if (!bars || !n) return;
 
     lv_obj_t* o = lv_event_get_target_obj(e);
@@ -465,18 +515,28 @@ void seq_draw_cb(lv_event_t* e)
     d.opa = LV_OPA_70;
     const int32_t loopPx = (int32_t)bars * s_pxPerBar;
     if (loopPx <= 0) return;
-    /* The block's first pixel is this far into a pass of the scene. */
-    const int32_t fromPx = (int32_t)((ud >> 8) % bars) * s_pxPerBar;
+    /* The block's first pixel is this far into a pass of the notes. */
+    const int32_t fromPx = (int32_t)(from % bars) * s_pxPerBar;
     /* Only the repeats that touch the area being redrawn. */
     const int32_t first = std::max<int32_t>(0, (clipArea.x1 - a.x1 + fromPx) / loopPx);
     const int32_t last  = std::min<int32_t>((a.x2 - a.x1 + fromPx) / loopPx, (clipArea.x2 - a.x1 + fromPx) / loopPx);
-    for (uint16_t i = 0; i < n; ++i) {
-        float at = 0.0f;
+    const float span = (float)(bars * s_seqTicksBar);
+    for (uint32_t i = 0; i < n; ++i) {
+        float at = 0.0f, held = 0.0f;
         uint8_t pad = 0, vel = 0;
-        if (!sq->getSceneEvent(scene, i, at, pad, vel) || pad >= 16) continue;
+        if (own) {
+            const crosspad::SeqNote& note = own->notes[i];
+            pad = note.pad;
+            at = (float)note.tick / span;
+            held = (float)note.len / span;
+        } else {
+            if (!sq->getSceneEvent(scene, (uint16_t)i, at, pad, vel)) continue;
+            held = sq->getSceneEventLength(scene, (uint16_t)i);
+        }
+        if (pad >= 16) continue;
         const int32_t y = bottom - 1 - (int32_t)pad * rows / 16;
         /* A held note is a line as long as it was held. */
-        const int32_t len = std::max<int32_t>(2, (int32_t)(sq->getSceneEventLength(scene, i) * (float)loopPx));
+        const int32_t len = std::max<int32_t>(2, (int32_t)(held * (float)loopPx));
         for (int32_t r = first; r <= last; ++r) {
             const int32_t x = a.x1 - fromPx + r * loopPx + (int32_t)(at * (float)loopPx);
             if (x < a.x1) continue;
@@ -579,7 +639,7 @@ void update_info()
         const auto& sel = song.tracks[s_selTrack].clips;
         const bool valid = s_selIndex >= 0 && s_selIndex < (int)sel.size();
         if (valid && (s_selTrack != locTrack || s_selIndex != locIndex)) {
-            s_transport.setStartBar(sel[s_selIndex].bar);
+            crosspad::songTransport().setStartBar(sel[s_selIndex].bar);
         }
         locTrack = s_selTrack;
         locIndex = valid ? s_selIndex : -1;
@@ -608,7 +668,7 @@ void update_info()
         }
         return;   // the bar count already says this; see the note above
     } else if (se->playEndBars() == 0) {
-        note( "Empty song -- BOUNCE a scene in the Sequencer, or ADD a clip");
+        note( "Empty song -- REC records the pads here, or EDIT adds a clip");
     } else {
         return;   // likewise
     }
@@ -683,6 +743,8 @@ void rebuild_group()
     lv_obj_t* focused = lv_group_get_focused(s_encGroup);
     lv_group_remove_all_objs(s_encGroup);
     lv_group_add_obj(s_encGroup, s_projBtn);
+    lv_group_add_obj(s_encGroup, s_followBtn);
+    lv_group_add_obj(s_encGroup, s_editBtn);
     lv_group_add_obj(s_encGroup, s_syncBtn);
     lv_group_add_obj(s_encGroup, s_loopBtn);
     lv_group_add_obj(s_encGroup, s_zoomBtn);
@@ -714,6 +776,22 @@ void rebuild_group()
     }
 #endif
 }
+
+void set_bg(lv_obj_t* o, lv_color_t c);
+void set_ink(lv_obj_t* o, lv_color_t c);
+void set_text(lv_obj_t* l, const char* text);
+
+/// S or M on a header: lit in its colour, or dark.
+void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
+{
+    if (!b) return;
+    set_bg(b, on ? col : kWell);
+    set_ink(lv_obj_get_child(b, 0), on ? kInk : kDim);
+}
+void head_mute_cb(lv_event_t* e);
+void head_solo_cb(lv_event_t* e);
+void toggle_mute(int t);
+void toggle_solo(int t);
 
 void rebuild_timeline()
 {
@@ -754,6 +832,10 @@ void rebuild_timeline()
     const int32_t view = lv_obj_get_content_width(s_timeline);
     uint32_t bars = std::max({song.songEnd(), end, song.loopEnd}) + 8;
     bars = std::max<uint32_t>(bars, (uint32_t)(view / s_pxPerBar) + 1);
+    /* A take running on past the last block: lanes for where it is going. */
+    if (se->playing()) bars = std::max<uint32_t>(bars, (uint32_t)se->positionBars() + 16);
+    s_drawnBars = bars;
+    s_seqTicksBar = song.seqTicksPerBar();
     /* A tick per bar while they are far enough apart, else per 4; a number
      * wherever there is room for one, on a bar that starts a 4-bar phrase. */
     const uint32_t tickStep = s_pxPerBar >= 6 ? 1 : 4;
@@ -808,14 +890,15 @@ void rebuild_timeline()
             lv_obj_set_size(o, std::max<int32_t>(2, (int32_t)over * s_pxPerBar - 1), kLaneH);
             lv_obj_set_style_radius(o, 3, 0);
             lv_obj_set_style_bg_color(o, track_color(song.tracks[tr]), 0);
-            lv_obj_set_style_bg_opa(o, song.tracks[tr].muted ? LV_OPA_30 : LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_opa(o, song.silenced(tr) ? LV_OPA_30 : LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(o, 2, 0);
             lv_obj_set_style_pad_top(o, 1, 0);
             lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(o, seq_lane_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)tr);
             lv_obj_add_event_cb(o, seq_lane_cb, LV_EVENT_CLICKED, (void*)(intptr_t)tr);
-            lv_obj_add_event_cb(o, seq_draw_cb, LV_EVENT_DRAW_MAIN_END, seq_ud(song.tracks[tr].scene, 0));
+            s_seqLaneScene = song.tracks[tr].scene;
+            lv_obj_add_event_cb(o, seq_draw_cb, LV_EVENT_DRAW_MAIN_END, (void*)(intptr_t)-1);
             lv_obj_t* lb = lv_label_create(o);
             lv_obj_set_style_text_font(lb, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(lb, kInk, 0);
@@ -837,7 +920,7 @@ void rebuild_timeline()
             lv_obj_set_style_radius(o, 3, 0);
             /* Coloured by type, like the track's badge (UX 2000 section 7). */
             lv_obj_set_style_bg_color(o, seq ? track_color(song.tracks[tr]) : kAudioT, 0);
-            lv_obj_set_style_bg_opa(o, song.tracks[tr].muted ? LV_OPA_30 : LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_opa(o, song.silenced(tr) ? LV_OPA_30 : LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(o, 2, 0);
             lv_obj_set_style_pad_top(o, 1, 0);
             lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
@@ -845,16 +928,19 @@ void rebuild_timeline()
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
-            if (seq) lv_obj_add_event_cb(o, seq_draw_cb, LV_EVENT_DRAW_MAIN_END, seq_ud(song.tracks[tr].scene, c.from));
-            else     lv_obj_add_event_cb(o, block_draw_cb, LV_EVENT_DRAW_MAIN_END, (void*)(intptr_t)s_blockCount);
+            lv_obj_add_event_cb(o, seq ? seq_draw_cb : block_draw_cb, LV_EVENT_DRAW_MAIN_END,
+                                (void*)(intptr_t)s_blockCount);
 
             lv_obj_t* lb = lv_label_create(o);
             lv_obj_set_style_text_font(lb, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(lb, kInk, 0);
             lv_label_set_long_mode(lb, LV_LABEL_LONG_CLIP);
             lv_obj_set_width(lb, LV_PCT(100));
-            if (seq) set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
-            else     lv_label_set_text(lb, short_name(c.file).c_str());
+            /* A block of its own notes is the seq track's part; one that
+             * plays the scene says which. */
+            if (seq && c.notes) lv_label_set_text(lb, "SEQ");
+            else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
+            else                lv_label_set_text(lb, short_name(c.file).c_str());
 
             Block b;
             b.obj = o;
@@ -863,7 +949,13 @@ void rebuild_timeline()
             b.file = c.file;
             b.offset = c.offset;
             b.frames = c.frames;
-            b.muted = song.tracks[tr].muted;
+            b.bars = c.bars;
+            b.fitted = song.tracks[tr].stretch != crosspad::StretchMode::Off;
+            b.muted = song.silenced(tr);
+            b.seq = seq;
+            b.notes = c.notes;
+            b.scene = song.tracks[tr].scene;
+            b.from = c.from;
             crosspad::ClipPeaks cp;
             if (!seq && se->clipPeaks(c.file, cp)) set_peaks(b, cp);
             s_blocks[s_blockCount++] = std::move(b);
@@ -923,18 +1015,25 @@ void rebuild_timeline()
 
     for (int t = 0; t < kTracks; ++t) {
         if (!s_heads[t]) continue;
-        if (t >= used) { lv_obj_add_flag(s_heads[t], LV_OBJ_FLAG_HIDDEN); continue; }
-        lv_obj_remove_flag(s_heads[t], LV_OBJ_FLAG_HIDDEN);
-        /* Muted is the panel gone red, as it was; the badge keeps the type's
-         * colour either way -- it says which app this track belongs to, and
-         * that does not change because it is silent. */
-        const bool m = song.tracks[t].muted;
-        lv_obj_set_style_bg_color(s_heads[t], m ? kMute : kPanel, 0);
-        if (s_headNum[t]) lv_obj_set_style_text_color(s_headNum[t], m ? kInk : kText, 0);
-        if (s_headBadge[t]) {
-            lv_label_set_text(s_headBadge[t], track_badge(song.tracks[t]));
-            lv_obj_set_style_text_color(s_headBadge[t], track_color(song.tracks[t]), 0);
+        if (t >= used) {
+            lv_obj_add_flag(s_heads[t], LV_OBJ_FLAG_HIDDEN);
+            if (s_meterWell[t]) lv_obj_add_flag(s_meterWell[t], LV_OBJ_FLAG_HIDDEN);
+            continue;
         }
+        lv_obj_remove_flag(s_heads[t], LV_OBJ_FLAG_HIDDEN);
+        if (s_meterWell[t]) lv_obj_remove_flag(s_meterWell[t], LV_OBJ_FLAG_HIDDEN);
+        /* The number in the colour of the app that makes the track -- the
+         * only place the screen says a track is a seq; the name under it, or
+         * AUD / KIT / PITCH until it has one, dim while the track is silent. */
+        const auto& tr = song.tracks[t];
+        s_trackQuiet[t] = song.silenced(t);
+        set_ink(s_headNum[t], track_color(tr));
+        if (s_headName[t]) {
+            set_text(s_headName[t], tr.name.empty() ? track_badge(tr) : tr.name.c_str());
+            set_ink(s_headName[t], s_trackQuiet[t] || tr.name.empty() ? kDim : kText);
+        }
+        style_toggle(s_headSolo[t], tr.solo, kKitT);
+        style_toggle(s_headMute[t], tr.muted, kMute);
     }
 
     /* "+ ADD TRACK", in the slot of the first track nobody has made -- and
@@ -1001,6 +1100,66 @@ void sync_transport()
     set_ink(lv_obj_get_child(s_loopBtn, 0), loop ? kInk : kDim);
     set_bg(s_syncBtn, sync ? kAccent : kPanel);
     set_ink(lv_obj_get_child(s_syncBtn, 0), sync ? kInk : kDim);
+    set_bg(s_followBtn, s_follow ? kAccent : kPanel);
+    set_ink(lv_obj_get_child(s_followBtn, 0), s_follow ? kInk : kDim);
+}
+
+/// The meters beside the lanes, from what each track is playing: straight
+/// up, down at ~28 dB a second. A segment lights at its level -- green
+/// below -6 dB, amber to -1, red above -- and only those that change are
+/// touched.
+void show_meters(crosspad::ISongEngine* se)
+{
+    static constexpr float kSegDb[kMeterSegs] = {-48, -42, -36, -30, -24, -18, -12, -6, -3, -1};
+    constexpr float kFall = 0.85f;             // a tick's fall
+    for (int t = 0; t < kTracks; ++t) {
+        if (!s_meterWell[t]) continue;
+        float lv[2] = {0.0f, 0.0f};
+        se->trackLevels(t, lv[0], lv[1]);
+        for (int c = 0; c < 2; ++c) {
+            s_meterShown[t][c] = s_trackQuiet[t] ? 0.0f : std::max(lv[c], s_meterShown[t][c] * kFall);
+            const float v = s_meterShown[t][c];
+            const float db = v > 0.0f ? 20.0f * std::log10(v) : -96.0f;
+            uint8_t lit = 0;
+            while (lit < kMeterSegs && db >= kSegDb[lit]) ++lit;
+            if (lit == s_meterLit[t][c]) continue;
+            for (int i = 0; i < kMeterSegs; ++i) {
+                const bool on = i < lit, was = i < s_meterLit[t][c];
+                if (on != was) lv_obj_set_style_bg_opa(s_meterSeg[t][c][i], on ? LV_OPA_COVER : LV_OPA_20, 0);
+            }
+            s_meterLit[t][c] = lit;
+        }
+    }
+}
+
+/// Stretched or repitched blocks still being fitted to the tempo: a box over
+/// the lanes for as long as any is waiting -- they are made only while
+/// stopped, and until then those blocks play as recorded.
+void show_processing(crosspad::ISongEngine* se)
+{
+    if (!s_procBox) return;
+    const bool up = !lv_obj_has_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+    const uint32_t waiting = se->stretchWaiting();
+    if (!waiting) {
+        if (up) {
+            lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+            note("Time stretch done.");
+        }
+        return;
+    }
+    char buf[72];
+    if (se->playing()) {
+        std::snprintf(buf, sizeof(buf), "TIME STRETCH\n%u block%s wait for STOP",
+                      (unsigned)waiting, waiting == 1 ? "" : "s");
+    } else {
+        std::snprintf(buf, sizeof(buf), "PROCESSING TIME STRETCH\n%u block%s left  -  %u%%",
+                      (unsigned)waiting, waiting == 1 ? "" : "s", (unsigned)se->stretchProgress());
+    }
+    set_text(s_procLabel, buf);
+    if (!up) {
+        lv_obj_remove_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_procBox);
+    }
 }
 
 void fill_clips();
@@ -1029,6 +1188,7 @@ void tick_cb(lv_timer_t*)
             note( "That song could not be read; it is left untouched on the card.");
         }
     }
+    show_processing(se);
     if (s_merging) {
         char buf[48];
         if (se->editState() == crosspad::SongOpState::Busy) {
@@ -1089,6 +1249,7 @@ void tick_cb(lv_timer_t*)
         total = se->playEndBars();
     }
     if (shape != s_shape) rebuild_timeline();
+    show_meters(se);
     sync_transport();
 
     if (!s_playhead) return;
@@ -1098,8 +1259,9 @@ void tick_cb(lv_timer_t*)
          * it a bar a detent, and the grid follows it there -- only when it
          * moves, so a finger scrolling the timeline is not pulled back. */
         static uint32_t shownAt = UINT32_MAX;
-        const uint32_t at = s_transport.startBar();
+        const uint32_t at = crosspad::songTransport().startBar();
         const int32_t x = (int32_t)at * s_pxPerBar;
+        set_bg(s_playhead, kHead);
         if (lv_obj_has_flag(s_playhead, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_playhead, LV_OBJ_FLAG_HIDDEN);
         if (lv_obj_get_x(s_playhead) != x) lv_obj_set_pos(s_playhead, x, 0);
         if (at != shownAt) {
@@ -1115,12 +1277,22 @@ void tick_cb(lv_timer_t*)
         return;
     }
     const double pos = se->positionBars();
+    /* A take past the last block runs off the lanes: they are drawn on. */
+    if ((uint32_t)pos + 2 >= s_drawnBars) {
+        rebuild_timeline();
+        if (!s_playhead) return;
+    }
     const int32_t x = (int32_t)(pos * s_pxPerBar);
+    /* Red while the pads are being recorded onto the song. */
+    set_bg(s_playhead, se->seqTake() != crosspad::SyncTake::None ? kRec : kHead);
     if (lv_obj_has_flag(s_playhead, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_playhead, LV_OBJ_FLAG_HIDDEN);
     if (lv_obj_get_x(s_playhead) != x) lv_obj_set_pos(s_playhead, x, 0);
-    std::snprintf(buf, sizeof(buf), "bar %d / %u", (int)pos + 1, (unsigned)total);
+    std::snprintf(buf, sizeof(buf), "bar %d/%u", (int)pos + 1, (unsigned)total);
     set_text(s_posLabel, buf);
 
+    /* FOLLOW off: the lanes stay where the player put them, and the playhead
+     * may run off them. */
+    if (!s_follow) return;
     const int32_t view = lv_obj_get_content_width(s_timeline);
     const int32_t left = lv_obj_get_scroll_x(s_timeline);
     if (x < left || x > left + view * 2 / 3) {
@@ -1442,8 +1614,11 @@ void leave_region_edit();
 void close_overlay();
 
 /// The power button's click goes back one step, and only one: a window, the
-/// loop region being turned, MOVE being turned, the keys a block opened, the
-/// block picked -- and out of the app only with none of them left. (The
+/// loop region being turned, MOVE being turned, the keys a block opened --
+/// and out of the app with none of them left. A block that is only picked is
+/// not a step: the encoder picks one by walking over it, the pick outlives
+/// the screen, and a click spent unpicking it showed nothing but a 2 px
+/// outline going, so getting out took two clicks or more (12.10.2026). (The
 /// encoder's edit mode and the top bar's focus are stepped out of before this
 /// is asked: powerBack().)
 bool back_handler(lv_obj_t*)
@@ -1459,10 +1634,6 @@ bool back_handler(lv_obj_t*)
          * step before this to have left: it stops here, the keys stay. */
         if (s_moveAxis != MoveAxis::None) { set_move_axis(MoveAxis::None); place_move_arrows(); return true; }
         leave_tools();
-        return true;
-    }
-    if (s_selIndex >= 0) {
-        select(s_selTrack, -1);
         return true;
     }
     return false;
@@ -1503,6 +1674,21 @@ void loop_cb(lv_event_t*)
     }
     se->commit();
     sync_transport();
+}
+
+/// FOLLOW: the lanes scroll with the playhead while the song plays, or stay
+/// put so a block can be edited while it does. Turned back on, they go to
+/// the playhead at once.
+void follow_cb(lv_event_t*)
+{
+    s_follow = !s_follow;
+    sync_transport();
+    auto* se = engine();
+    if (!s_follow || !se || !s_timeline) return;
+    const double at = se->playing() ? se->positionBars() : (double)crosspad::songTransport().startBar();
+    const int32_t x = (int32_t)(at * s_pxPerBar);
+    const int32_t view = lv_obj_get_content_width(s_timeline);
+    lv_obj_scroll_to_x(s_timeline, x > view / 3 ? x - view / 3 : 0, LV_ANIM_ON);
 }
 
 /// The sequencer along with the song, from the next Play on: started with
@@ -1561,6 +1747,7 @@ void close_overlay()
     s_overlay = nullptr;
     s_songList = nullptr;
     s_tempoItem = nullptr;
+    s_trackNameArea = nullptr;
     for (auto& d : s_mixDb) d = nullptr;
     for (auto& m : s_mixMute) m = nullptr;
 }
@@ -2338,7 +2525,7 @@ uint32_t playhead_bar()
         const double b = se->positionBars();
         return b > 0.0 ? (uint32_t)b : 0;
     }
-    return s_transport.startBar();
+    return crosspad::songTransport().startBar();
 }
 
 /// The block of the picked track under the playhead, in two there.
@@ -2490,6 +2677,21 @@ void merge_all_cb(lv_event_t*) { run_merge(0x0F); }
 
 // ── the EDIT menu ──────────────────────────────────────────────────────────
 
+/// UNDO / REDO: the arrangement a step back or forward (ISongEngine::undo).
+/// The timeline repaints from the song's shape on the next tick.
+void undo_redo(bool back)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    if (back ? se->undo() : se->redo()) {
+        select(s_selTrack, -1);
+        note(back ? "Undone." : "Redone.");
+    } else {
+        note("Not now: a merge, a bounce or a new tempo is still being written.");
+    }
+}
+
 void edit_cb(lv_event_t*)
 {
     auto* se = engine();
@@ -2510,6 +2712,17 @@ void edit_cb(lv_event_t*)
     if (region) std::snprintf(title, sizeof(title), "Edit   (loop region: bars %u - %u)", (unsigned)(a + 1), (unsigned)b);
     else        std::snprintf(title, sizeof(title), "Edit   (no loop region)");
     overlay_list(title);
+    /* What was just done, back or again, before anything new. */
+    if (const uint32_t n = se->undoSteps()) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_LEFT " Undo   (%u)", (unsigned)n);
+        overlay_item(buf, [](lv_event_t*) { undo_redo(true); }, nullptr);
+    }
+    if (const uint32_t n = se->redoSteps()) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_RIGHT " Redo   (%u)", (unsigned)n);
+        overlay_item(buf, [](lv_event_t*) { undo_redo(false); }, nullptr);
+    }
     /* First, because it is the one row here that puts something on a track:
      * it was the "+ ADD" key before the export's row gave that slot to EDIT
      * and BOUNCE. A track is normally filled by recording into it; this is
@@ -2697,6 +2910,7 @@ void choose_audio_cb(lv_event_t*)
     crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
     f.clear();
     f.track = made;
+    f.bar = playhead_bar();      // the take, with the song, starts there
     if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
         f.clear();
         note_fmt("Track %d added. No Recorder in this firmware -- EDIT it to add a clip.", made + 1);
@@ -2739,7 +2953,10 @@ void choose_source_cb(lv_event_t* e)
     open_seq_track(made);
 }
 
-/// The sequencer, on this track's scene and knowing it came from here.
+/// A seq track's screen, on its scene and knowing it came from here: a Pitch
+/// track opens in Pitch Play -- the very screen the MODE map's Pitch opens,
+/// which takes the transport for this scene so REC and DUB record what is
+/// played on its keys -- and a kit track in the sequencer's seq view.
 void open_seq_track(int track)
 {
     auto* se = engine();
@@ -2765,12 +2982,17 @@ void open_seq_track(int track)
         f.seq    = true;
         f.source = t.source;
         f.scene  = t.scene;
+        /* The block the seq view edits: the one picked, or the one under the
+         * playhead -- or, on an empty bar, the block its first notes make. */
+        const bool picked = s_selTrack == track && s_selIndex >= 0 && s_selIndex < (int)t.clips.size();
+        f.bar = picked ? t.clips[(size_t)s_selIndex].bar : playhead_bar();
     }
     if (moved) se->commit();
     if (sq) sq->selectScene(f.scene);
-    if (!crosspad_gui::mode_overlay_open_app("Sequencer")) {
+    const bool pitch = f.source == crosspad::SeqSource::Pitch;
+    if (!crosspad_gui::mode_overlay_open_app(pitch ? "PitchPlay" : "Sequencer")) {
         f.clear();
-        note("No sequencer in this firmware.");
+        note(pitch ? "No Pitch Play in this firmware." : "No sequencer in this firmware.");
     }
 }
 
@@ -2829,7 +3051,7 @@ void seq_source_sheet()
     sheet_card(164, "PITCH PLAY", "Pitch", "one sample in pitch:", "bass, keys, melody",
                kPitchT, true, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Pitch);
 
-    sheet_rules("EDIT in the seq opens the Sampler or Pitch Play.",
+    sheet_rules("Pitch opens Pitch Play; Kit opens the seq view.",
                 "Bounce turns the seq into audio and frees the slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
@@ -2962,41 +3184,170 @@ void delete_track_sheet()
 
 void add_track_cb(lv_event_t*) { new_track_sheet(); }
 
+void track_name_done_cb(lv_event_t* e)
+{
+    const bool ok = lv_event_get_code(e) == LV_EVENT_READY;
+    auto* se = engine();
+    std::string name = s_trackNameArea ? lv_textarea_get_text(s_trackNameArea) : "";
+    close_overlay();
+    if (!ok || !se) return;
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    while (!name.empty() && name.front() == ' ') name.erase(0, 1);
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse) return;
+        t.name = name;
+    }
+    se->commit();
+}
+
+/// RENAME on a track's menu: the name its header shows, kept with the song.
+void rename_track_sheet()
+{
+    auto* se = engine();
+    if (!se || s_overlay) return;
+    std::string name;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse) return;
+        name = t.name;
+    }
+    char title[32];
+    std::snprintf(title, sizeof(title), "Track %d  -  name", s_selTrack + 1);
+    overlay_list(title);
+    lv_obj_remove_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    s_trackNameArea = lv_textarea_create(s_overlay);
+    lv_textarea_set_one_line(s_trackNameArea, true);
+    lv_textarea_set_max_length(s_trackNameArea, 24);
+    lv_textarea_set_text(s_trackNameArea, name.c_str());
+    lv_obj_set_width(s_trackNameArea, LV_PCT(100));
+    lv_obj_set_style_bg_color(s_trackNameArea, kPanel, 0);
+    lv_obj_set_style_border_width(s_trackNameArea, 0, 0);
+    lv_obj_set_style_radius(s_trackNameArea, 6, 0);
+    lv_obj_set_style_text_color(s_trackNameArea, kText, 0);
+    lv_obj_set_style_text_font(s_trackNameArea, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(s_trackNameArea, kAccent, LV_PART_CURSOR);
+    lv_obj_t* kb = lv_keyboard_create(s_overlay);
+    lv_obj_set_width(kb, LV_PCT(100));
+    lv_obj_set_flex_grow(kb, 1);
+    lv_keyboard_set_textarea(kb, s_trackNameArea);
+    lv_obj_add_event_cb(kb, track_name_done_cb, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(kb, track_name_done_cb, LV_EVENT_CANCEL, nullptr);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) {
+        lv_group_add_obj(s_overlayGroup, kb);
+        lv_group_focus_obj(kb);
+        lv_group_set_editing(s_overlayGroup, true);
+    }
+#endif
+}
+
+/// TIME STRETCH on an audio track: its blocks keep their bars through a
+/// change of tempo and play their audio fitted to them -- stretched, the
+/// pitch kept, or repitched, the pitch moving with the tempo as on a
+/// turntable. Rendered by the song engine while stopped, as recorded until
+/// then (SongTrack::stretch).
+void stretch_mode_cb(lv_event_t* e)
+{
+    const auto mode = (crosspad::StretchMode)(intptr_t)lv_event_get_user_data(e);
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse || t.kind != crosspad::TrackKind::Audio || t.stretch == mode) return;
+        t.stretch = mode;
+    }
+    se->commit();
+    rebuild_timeline();   // the waveforms: fitted to the bars, or at their own speed
+    switch (mode) {
+    case crosspad::StretchMode::Off:
+        note_fmt("Track %d plays as recorded again.", s_selTrack + 1);
+        break;
+    case crosspad::StretchMode::KeepPitch:
+        note_fmt("Track %d follows the tempo, its pitch kept -- fitted while stopped.", s_selTrack + 1);
+        break;
+    case crosspad::StretchMode::Repitch:
+        note_fmt("Track %d follows the tempo, its pitch with it -- fitted while stopped.", s_selTrack + 1);
+        break;
+    }
+}
+
+void stretch_sheet()
+{
+    auto* se = engine();
+    if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
+    crosspad::StretchMode cur = crosspad::StretchMode::Off;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse || t.kind != crosspad::TrackKind::Audio) return;
+        cur = t.stretch;
+    }
+    char title[40];
+    std::snprintf(title, sizeof(title), "Track %d  -  time stretch", s_selTrack + 1);
+    overlay_list(title);
+    static const struct { crosspad::StretchMode mode; const char* text; } kRows[] = {
+        {crosspad::StretchMode::Off,       "Off  -  plays as recorded"},
+        {crosspad::StretchMode::KeepPitch, "Stretch  -  keeps its pitch"},
+        {crosspad::StretchMode::Repitch,   "Repitch  -  like a turntable"},
+    };
+    for (const auto& r : kRows) {
+        char text[64];
+        std::snprintf(text, sizeof(text), "%s %s", r.mode == cur ? LV_SYMBOL_OK : "    ", r.text);
+        overlay_item(text, stretch_mode_cb, (void*)(intptr_t)r.mode);
+    }
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
 void track_menu()
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
-    bool seq = false;
+    bool seq = false, muted = false, solo = false;
+    crosspad::StretchMode stretch = crosspad::StretchMode::Off;
     char title[32];
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& t = se->song().tracks[s_selTrack];
         if (!t.inUse) return;
         seq = t.kind == crosspad::TrackKind::Seq;
+        stretch = t.stretch;
+        muted = t.muted;
+        solo = t.solo;
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
     }
     overlay_list(title);
     if (seq) overlay_item(LV_SYMBOL_AUDIO " Bounce to audio ...", [](lv_event_t*) { close_overlay(); bounce_sheet(); }, nullptr);
+    else overlay_item(stretch == crosspad::StretchMode::KeepPitch ? LV_SYMBOL_SHUFFLE " Time stretch: STRETCH ..."
+                      : stretch == crosspad::StretchMode::Repitch ? LV_SYMBOL_SHUFFLE " Time stretch: REPITCH ..."
+                                                                  : LV_SYMBOL_SHUFFLE " Time stretch: OFF ...",
+                      [](lv_event_t*) { close_overlay(); stretch_sheet(); }, nullptr);
+    overlay_item(muted ? LV_SYMBOL_MUTE " Mute: ON" : LV_SYMBOL_VOLUME_MAX " Mute: OFF",
+                 [](lv_event_t*) { close_overlay(); toggle_mute(s_selTrack); }, nullptr);
+    overlay_item(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
+                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); }, nullptr);
+    overlay_item(LV_SYMBOL_EDIT " Rename track ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); }, nullptr);
     overlay_item(LV_SYMBOL_TRASH " Delete track ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); }, nullptr);
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
 }
 
-/// EDIT held: the selected track, in the app that makes it.
+/// CLIP EDIT: the selected track, in the app that makes it.
 ///
-/// A seq track opens the sequencer on its scene; an audio track opens the
-/// Recorder, to record into it. A click on EDIT is the song's own editing --
-/// the loop region, copy / paste, merging tracks, its length, a clip from the
-/// library (edit_cb). With no track picked the hold opens that menu too --
-/// see below.
-void edit_track_cb(lv_event_t*)
+/// A seq track opens the sequencer on its scene (a Pitch track Pitch Play,
+/// whose SEQ key leads on to the notes); an audio track opens the Recorder on
+/// the block picked -- or the one under the playhead -- to trim it and put it
+/// back where it was, or, on an empty bar, to record into the track. The
+/// timeline's editing is the EDIT beside SYNC (edit_cb).
+void clip_edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging) return;
-    /* The release after a hold is still a click: without this it would open
-     * the menu over whatever the hold just opened. */
-    lv_indev_wait_release(lv_indev_active());
     bool inUse = false, seq = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -3004,15 +3355,18 @@ void edit_track_cb(lv_event_t*)
         inUse = t.inUse;
         seq = t.kind == crosspad::TrackKind::Seq;
     }
-    /* With no track picked there is no track to edit, and a key that only
-     * complains is a key that broke: EDIT then means the song, which is what
-     * it meant before the track flow existed and is still the other half of
-     * what this key does. */
-    if (!inUse) { edit_cb(nullptr); return; }
+    if (!inUse) { note("Pick a track or a block first -- EDIT at the top edits the timeline."); return; }
     if (seq) { open_seq_track(s_selTrack); return; }
+    int pickedBar = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& cs = se->song().tracks[s_selTrack].clips;
+        if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) pickedBar = (int)cs[(size_t)s_selIndex].bar;
+    }
     crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
     f.clear();
     f.track = s_selTrack;
+    f.bar = pickedBar >= 0 ? (uint32_t)pickedBar : playhead_bar();
     if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
         f.clear();
         note("No Recorder in this firmware. EDIT adds a clip from the library.");
@@ -3140,6 +3494,37 @@ void mix_mute_cb(lv_event_t* e)
     mix_show();
 }
 
+/// M and S on a header, and in its menu. The timeline repaints from the
+/// song's shape on the next tick.
+void toggle_mute(int t)
+{
+    auto* se = engine();
+    if (!se || t < 0 || t >= kTracks) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& tr = se->song().tracks[t];
+        if (!tr.inUse) return;
+        tr.muted = !tr.muted;
+    }
+    se->commit();
+}
+
+void toggle_solo(int t)
+{
+    auto* se = engine();
+    if (!se || t < 0 || t >= kTracks) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& tr = se->song().tracks[t];
+        if (!tr.inUse) return;
+        tr.solo = !tr.solo;
+    }
+    se->commit();
+}
+
+void head_mute_cb(lv_event_t* e) { toggle_mute((int)(intptr_t)lv_event_get_user_data(e)); }
+void head_solo_cb(lv_event_t* e) { toggle_solo((int)(intptr_t)lv_event_get_user_data(e)); }
+
 /// A track's strip, as on a desk: its number, a tall fader, the dB, M.
 void mix_strip(lv_obj_t* strips, int t, float volume)
 {
@@ -3249,15 +3634,17 @@ void mix_cb(lv_event_t*)
 // It outlives the screen (the song does), so it is a timer of its own and
 // never deleted. LVGL task only.
 
-/// The song has a Pitch seq track that plays (in use, not muted).
+/// The song has a Pitch seq track that plays (in use, not silenced).
 bool song_has_pitch_track()
 {
     auto* se = engine();
     if (!se) return false;
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
-    for (const auto& t : se->song().tracks) {
+    const auto& song = se->song();
+    for (int i = 0; i < kTracks; ++i) {
+        const auto& t = song.tracks[i];
         if (t.inUse && t.kind == crosspad::TrackKind::Seq &&
-            t.source == crosspad::SeqSource::Pitch && !t.muted) return true;
+            t.source == crosspad::SeqSource::Pitch && !song.silenced(i)) return true;
     }
     return false;
 }
@@ -3351,11 +3738,11 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * No back button and no PLAY: back is the power button's click, and the
      * transport is the bar above. ZOOM takes the place the two zoom keys had
      * on the tool row, which is where the export puts it. */
-    s_projBtn = make_button(s_root, 80, "", project_cb);
+    s_projBtn = make_button(s_root, 54, "", project_cb);
     place(s_projBtn, 6, ARR_Y(35));
     s_projLabel = lv_obj_get_child(s_projBtn, 0);
     lv_label_set_long_mode(s_projLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_projLabel, 74);
+    lv_obj_set_width(s_projLabel, 48);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
     /* The export's dim "18 bars". It carries this screen's status line too:
@@ -3364,8 +3751,8 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * those sentences are longer than the slot and the export leaves no row
      * for them. */
     s_posLabel = lv_label_create(s_root);
-    lv_obj_set_width(s_posLabel, 62);
-    place(s_posLabel, 90, ARR_Y(40));
+    lv_obj_set_width(s_posLabel, 42);
+    place(s_posLabel, 63, ARR_Y(40));
     lv_obj_set_style_text_font(s_posLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_posLabel, kDim, 0);
     lv_obj_set_style_text_align(s_posLabel, LV_TEXT_ALIGN_RIGHT, 0);
@@ -3376,12 +3763,21 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_label_set_long_mode(s_posLabel, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_posLabel, "");
 
-    s_syncBtn = make_button(s_root, 48, "SYNC", sync_cb);
-    place(s_syncBtn, 158, ARR_Y(35));
-    s_loopBtn = make_button(s_root, 52, "LOOP", loop_cb);
-    place(s_loopBtn, 210, ARR_Y(35));
-    s_zoomBtn = make_button(s_root, 48, "ZOOM", zoom_cycle_cb);
-    place(s_zoomBtn, 266, ARR_Y(35));
+    /* EDIT here is the timeline's: the loop region, copy / paste, merging,
+     * the song's length, a clip from the library (edit_cb). The key at the
+     * foot is the clip's (clip_edit_cb). */
+    /* FOLLOW beside the position it follows; the keys after it a little
+     * narrower than the export's, to make the room. */
+    s_followBtn = make_button(s_root, 42, "FOLLOW", follow_cb);
+    place(s_followBtn, 108, ARR_Y(35));
+    s_editBtn = make_button(s_root, 36, "EDIT", edit_cb);
+    place(s_editBtn, 153, ARR_Y(35));
+    s_syncBtn = make_button(s_root, 40, "SYNC", sync_cb);
+    place(s_syncBtn, 192, ARR_Y(35));
+    s_loopBtn = make_button(s_root, 40, "LOOP", loop_cb);
+    place(s_loopBtn, 235, ARR_Y(35));
+    s_zoomBtn = make_button(s_root, 38, "ZOOM", zoom_cycle_cb);
+    place(s_zoomBtn, 278, ARR_Y(35));
 
     /* ── lanes: the track buttons fixed, the timeline scrolling beside them ──
      * The export's LANE_X=48 and a lane block from screen y=62 to 200. */
@@ -3393,7 +3789,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_column(body, 4, 0);   // 4 + 40 + 4 = the export's LANE_X 48
+    lv_obj_set_style_pad_column(body, 4, 0);   // 4 + 80 + 4: the lanes from x 88 to 302, the meters on 306
 
     lv_obj_t* heads = lv_obj_create(body);
     lv_obj_remove_style_all(heads);
@@ -3415,25 +3811,68 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
          * keys and MIX is not one of them, so it moved to the one gesture
          * these buttons were not using -- and the association is exact. */
         lv_obj_add_event_cb(h, mix_cb, LV_EVENT_LONG_PRESSED, nullptr);
-        /* The number, and under it what the track holds: AUD, KIT or PITCH in
-         * the colour of the app that makes it. The badge is the only place
-         * the screen says a track is a seq -- its block looks like a block. */
+        /* "01" in the type's colour over the name; S over M on the right
+         * edge, touched there -- the encoder reaches both in the header's
+         * menu, so the group keeps one stop a track. */
         lv_obj_t* l = lv_label_create(h);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(l, kText, 0);
-        set_text_fmt(l, "%d", t + 1);
-        lv_obj_set_pos(l, 4, 0);
-        lv_obj_t* badge = lv_label_create(h);
-        lv_obj_set_style_text_font(badge, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(badge, kAudioT, 0);
-        lv_label_set_long_mode(badge, LV_LABEL_LONG_CLIP);
-        lv_obj_set_width(badge, kHeadW - 4);
-        lv_label_set_text(badge, "AUD");
-        lv_obj_set_pos(badge, 3, 16);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(l, kAudioT, 0);
+        set_text_fmt(l, "%02d", t + 1);
+        lv_obj_set_pos(l, 5, 1);
+        lv_obj_t* name = lv_label_create(h);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(name, kText, 0);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(name, 54);
+        lv_label_set_text(name, "");
+        lv_obj_set_pos(name, 5, 13);
+        auto toggle = [&](int32_t y, const char* text, lv_event_cb_t cb) {
+            lv_obj_t* b = lv_obj_create(h);
+            lv_obj_remove_style_all(b);
+            lv_group_remove_obj(b);
+            lv_obj_set_size(b, 14, 12);
+            lv_obj_set_pos(b, 62, y);
+            lv_obj_set_style_radius(b, 3, 0);
+            lv_obj_set_style_bg_color(b, kWell, 0);
+            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_ext_click_area(b, 4);
+            /* A child's click does not bubble: it never opens the menu. */
+            lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+            lv_obj_t* bl = lv_label_create(b);
+            lv_obj_set_style_text_font(bl, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(bl, kDim, 0);
+            lv_label_set_text(bl, text);
+            lv_obj_center(bl);
+            return b;
+        };
+        s_headSolo[t] = toggle(3, "S", head_solo_cb);
+        s_headMute[t] = toggle(17, "M", head_mute_cb);
         s_heads[t] = h;
         s_headNum[t] = l;
-        s_headBadge[t] = badge;
+        s_headName[t] = name;
     }
+
+    /* Over the lanes, through which a touch goes: it says, it does not ask. */
+    s_procBox = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_procBox);
+    lv_obj_set_size(s_procBox, 220, 40);
+    place(s_procBox, 50, ARR_Y(110));
+    lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_procBox, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(s_procBox, 6, 0);
+    lv_obj_set_style_bg_color(s_procBox, kBg, 0);
+    lv_obj_set_style_bg_opa(s_procBox, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(s_procBox, kAccent, 0);
+    lv_obj_set_style_border_width(s_procBox, 2, 0);
+    s_procLabel = lv_label_create(s_procBox);
+    lv_obj_set_style_text_font(s_procLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_procLabel, kAccent, 0);
+    lv_obj_set_style_text_align(s_procLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_procLabel, "");
+    lv_obj_center(s_procLabel);
 
     /* The row that makes a track: full width, under the last one in use,
      * outlined rather than filled -- it is not a track, it is the offer of
@@ -3478,6 +3917,42 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_set_scroll_dir(s_timeline, LV_DIR_HOR);
     lv_obj_set_scrollbar_mode(s_timeline, LV_SCROLLBAR_MODE_OFF);
 
+    /* The tracks' stereo meters, beside the lanes: a well a track, two
+     * columns of ten segments bottom up -- green, two amber, one red -- at a
+     * fifth until lit (show_meters). */
+    lv_obj_t* meters = lv_obj_create(body);
+    lv_obj_remove_style_all(meters);
+    lv_obj_set_size(meters, kMeterW, LV_PCT(100));
+    lv_obj_remove_flag(meters, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(meters, LV_OBJ_FLAG_CLICKABLE);
+    for (int t = 0; t < kTracks; ++t) {
+        lv_obj_t* well = lv_obj_create(meters);
+        lv_obj_remove_style_all(well);
+        lv_obj_set_pos(well, 0, kRulerH + 4 + t * (kLaneH + kLaneGap));
+        lv_obj_set_size(well, kMeterW, kLaneH);
+        lv_obj_set_style_radius(well, 2, 0);
+        lv_obj_set_style_bg_color(well, kWell, 0);
+        lv_obj_set_style_bg_opa(well, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(well, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(well, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(well, LV_OBJ_FLAG_HIDDEN);     // shown for the tracks in use
+        for (int c = 0; c < 2; ++c) {
+            for (int i = 0; i < kMeterSegs; ++i) {
+                lv_obj_t* seg = lv_obj_create(well);
+                lv_obj_remove_style_all(seg);
+                lv_obj_set_pos(seg, 2 + c * 4, kLaneH - 2 - i * 3);
+                lv_obj_set_size(seg, 2, 2);
+                lv_obj_set_style_bg_color(seg, i >= 9 ? kMute : i >= 7 ? kKitT : kWave, 0);
+                lv_obj_set_style_bg_opa(seg, LV_OPA_20, 0);
+                lv_obj_remove_flag(seg, LV_OBJ_FLAG_CLICKABLE);
+                s_meterSeg[t][c][i] = seg;
+            }
+            s_meterShown[t][c] = 0.0f;
+            s_meterLit[t][c] = 0;
+        }
+        s_meterWell[t] = well;
+    }
+
     /* ── tools on the selected block ──────────────────────────────────────
      * The export's five keys at 58 px on a 62 px pitch, filling the width.
      * Z- and Z+ became ZOOM in the context row and MIX a long press on a
@@ -3508,17 +3983,15 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     struct { const char* text; lv_event_cb_t cb; } kTools[3] = {
         { "DUP",    dup_cb  },
         { "DEL",    del_cb  },
-        { "EDIT",   edit_cb },
+        { "CLIP EDIT", clip_edit_cb },
     };
     for (int i = 0; i < 3; ++i) {
         s_tools[i + 1] = tool_button(s_root, kToolW, kTools[i].text, kTools[i].cb);
         lv_obj_set_height(s_tools[i + 1], kToolH);
         place(s_tools[i + 1], 6 + (i + 1) * kToolPitch, ARR_Y(206));
     }
-    /* The selected track, where it is made, on a long press of EDIT. The
-     * export's row has five keys and EDIT is the song's editing; opening the
-     * track belongs on the key that means "change something" too. */
-    lv_obj_add_event_cb(s_tools[3], edit_track_cb, LV_EVENT_LONG_PRESSED, nullptr);
+    /* Two words: the size MOVE is set in. */
+    lv_obj_set_style_text_font(lv_obj_get_child(s_tools[3], 0), &lv_font_montserrat_10, 0);
 #ifdef ARR_USE_ENCODER
     s_toolGroup = lv_group_create();
     for (int t = 0; t < kBlockTools; ++t) lv_group_add_obj(s_toolGroup, s_tools[t]);
@@ -3565,7 +4038,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
              * song: handed over, not stopped. */
             {
                 auto* se = engine();
-                crosspad::transportClaim(&s_transport, !(se && se->playing()));
+                crosspad::transportClaim(&crosspad::songTransport(), !(se && se->playing()));
             }
             s_visible = true;
             sound_keeper_cb(nullptr);   // the instrument starts loading now, not in 100 ms
@@ -3641,12 +4114,17 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& b : s_blocks) b = Block{};
     for (auto& h : s_heads) h = nullptr;
     for (auto& l : s_headNum) l = nullptr;
-    for (auto& l : s_headBadge) l = nullptr;
+    for (auto& l : s_headName) l = nullptr;
+    for (auto& b : s_headMute) b = nullptr;
+    for (auto& b : s_headSolo) b = nullptr;
+    for (auto& w : s_meterWell) w = nullptr;
+    for (auto& tr : s_meterSeg) for (auto& side : tr) for (auto& s : side) s = nullptr;
+    s_procBox = s_procLabel = nullptr;
     for (auto& t : s_tools) t = nullptr;
     s_blockCount = 0;
     /* the status line went with the screen */
     s_root = s_timeline = s_playhead = s_projLabel = s_posLabel = nullptr;
-    s_zoomBtn = s_loopBtn = s_syncBtn = s_projBtn = nullptr;
+    s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_prevEncGroup) lv_indev_restore_group(indev_encoderTop, s_prevEncGroup);

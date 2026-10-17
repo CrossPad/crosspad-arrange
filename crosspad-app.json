@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.9.0",
+  "version": "0.15.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,16 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.34.0",
+    "crosspad-core": ">=1.58.0",
     "crosspad-gui": ">=1.17.0"
   },
   "changelog": [
+    "0.15.0: FOLLOW on the context row, beside the position: on (lime, as it opens) the lanes scroll with the playhead while the song plays; off they stay where they were put, so a block can be edited while it plays, and turned back on they go to the playhead at once. Kept across openings of the screen. The keys after it are a little narrower to make the room, and the position while playing reads bar 2/4.",
+    "0.14.0: CLIP EDIT on an audio block opens that block in the Recorder -- the one picked, else the one under the playhead -- to trim it and put it back where it was. A power-button click no longer spends a level on letting go of the picked block: back is window, region, MOVE, keys, so every click is one step out; the hidden level left clicks that seemed to do nothing.",
+    "0.13.0: REC and DUB on the top bar record the pads onto the seq track from the playhead (core 1.58 ISongEngine::recordSeq): a REC becomes a block of its own notes from the playhead's bar, as many whole bars as it ran (a STOP a beat past a bar line ends it there), the seq blocks under it gone; a DUB adds to the blocks it plays over and makes blocks where there were none; with LOOP over a region the take goes round it, the first pass replacing it and every lap after dubbed in and heard on the next. The playhead stands where the take stopped, so the next REC is the next part. While pressed the playing song punches in and out. A song with no seq track gets one, playing the kit, on the first free track. Seq blocks are drawn from their own notes and labelled SEQ (a block that still plays the track's scene says which); DUP copies a block as a clip of its own from its first edit; the lanes are drawn on ahead of a take running past the last block, and the playhead is red while one records. CLIP EDIT on a seq block opens the seq view on that block; requires core 1.58.",
+    "0.12.0: EDIT is two keys -- the timeline's EDIT beside SYNC (the menu: a clip from the library, cut, the loop region, copy / paste / duplicate, merge, the song's length) and CLIP EDIT at the foot, which opens the selected track where it is made at a click (the sequencer, Pitch Play or the Recorder), no hold any more. A track's header is the export's track head, variant A (80 px): \"01\" in the type's colour over the name (RENAME in its menu, kept with the song; AUD / KIT / PITCH until it has one), S over M at a touch (and in the menu, for the encoder; solo silences the others, seq track included); a stereo meter of ten segments a side beside each lane, which ends before it; requires core 1.57 (SongTrack name/solo, ISongEngine::trackLevels). While stretched or repitched blocks wait to be fitted to a new tempo, a box over the lanes says PROCESSING TIME STRETCH with the blocks left and the current one's percent -- or that they wait for STOP while the song plays. UNDO / REDO at the top of the timeline's EDIT, with the steps there are: every change of the arrangement -- a block moved, cut, deleted, a merge, a bounce, a new tempo, M / S, a name -- one step a burst (core 1.57 ISongEngine::undo).",
+    "0.11.0: an audio track's menu (a tap on its header) has TIME STRETCH: OFF, STRETCH or REPITCH -- its blocks keep their bars through a change of the song tempo and play their audio fitted to them, the pitch kept (stretch) or moving with the tempo as on a turntable (repitch); the song engine renders a copy of each into the song's clips/.stretch/ while nothing plays, the block plays as recorded until its copy is ready, the status line counts what is left, and the block's waveform fills its bars, as the copy that plays does; requires core 1.57",
+    "0.10.0: a Pitch track opens in Pitch Play -- the same screen as the MODE map's Pitch -- instead of the seq grid; a kit track still opens the seq view. The 'plays with' sheet says so.",
     "0.9.0: the status line sits in the status bar, centred where the CrossPad logo was (gui 1.17 statusbar_show_title), and the row it took goes to the tools at the foot: as tall as the screen leaves them, in the larger font, spread across the width; MOVE reads its axis as two arrows; requires gui 1.17",
     "0.8.0: every block shows its clip's waveform under its name, at the speed it plays -- a file shorter than its block ends early, one made at another tempo shows where its beats fall; read from the card while nothing plays, once, and kept in the song's .peaks/ (core 1.34 clipPeaks); requires core 1.34",
     "0.7.0: the song window exports the song to Ableton Live 12: <name>.als in the song's folder, which becomes a Live project -- four tracks, every block a clip on its bars at the song's tempo, faders, mutes and loop carried over; a report says what was left out; the songs list and the song window are lists under a header whose left end is the way back -- the open song marked, a click on it edits it, + NEW at the top, the song's settings a row each; requires core 1.33",
