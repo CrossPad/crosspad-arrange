@@ -11,11 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": "^2.0.0",
-    "crosspad-gui": "^2.0.0"
+    "crosspad-core": ">=1.70.0,<3.0.0",
+    "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
-    "0.15.1: requires crosspad-core 2.0 and crosspad-gui 2.0 (^2.0.0); a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none)",
+    "0.15.1: builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window; a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none)",
     "0.15.0: FOLLOW on the context row, beside the position: on (lime, as it opens) the lanes scroll with the playhead while the song plays; off they stay where they were put, so a block can be edited while it plays, and turned back on they go to the playhead at once. Kept across openings of the screen. The keys after it are a little narrower to make the room, and the position while playing reads bar 2/4.",
     "0.14.0: CLIP EDIT on an audio block opens that block in the Recorder -- the one picked, else the one under the playhead -- to trim it and put it back where it was. A power-button click no longer spends a level on letting go of the picked block: back is window, region, MOVE, keys, so every click is one step out; the hidden level left clicks that seemed to do nothing.",
     "0.13.0: REC and DUB on the top bar record the pads onto the seq track from the playhead (core 1.58 ISongEngine::recordSeq): a REC becomes a block of its own notes from the playhead's bar, as many whole bars as it ran (a STOP a beat past a bar line ends it there), the seq blocks under it gone; a DUB adds to the blocks it plays over and makes blocks where there were none; with LOOP over a region the take goes round it, the first pass replacing it and every lap after dubbed in and heard on the next. The playhead stands where the take stopped, so the next REC is the next part. While pressed the playing song punches in and out. A song with no seq track gets one, playing the kit, on the first free track. Seq blocks are drawn from their own notes and labelled SEQ (a block that still plays the track's scene says which); DUP copies a block as a clip of its own from its first edit; the lanes are drawn on ahead of a take running past the last block, and the playhead is red while one records. CLIP EDIT on a seq block opens the seq view on that block; requires core 1.58.",
