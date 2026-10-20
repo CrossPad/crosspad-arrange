@@ -3,20 +3,22 @@
  * @brief Arrange -- where a song starts, and the four tracks it is made of.
  *
  * The main place of work on the CrossPad (UX 2000 section 6). A song holds
- * four tracks: four audio, or one seq and three audio. A track is made here
- * and filled by the app that makes that kind of sound -- AUDIO opens the
- * Recorder, SEQ asks whether it plays through the Sampler's kit or Pitch Play
- * and opens the sequencer on a scene of its own -- and any track can be
- * bounced to audio at any time, which is also the only way to free the one
- * seq slot for the next idea.
+ * four tracks, up to two of them seqs: two kit tracks, each playing a kit of
+ * its own, or one Pitch track. A track is made here and filled by the app
+ * that makes that kind of sound -- AUDIO opens the Recorder, SEQ asks whether
+ * it plays through a kit (picked in the kit loader) or Pitch Play and opens
+ * the sequencer on a scene of its own -- and any track can be bounced to
+ * audio at any time, which is also how a seq slot is freed for the next idea.
  *
  * Audio tracks are laid out like a linear DAW: lanes, a bar ruler, every clip
  * a block as long as it plays, in a colour of its own, and a playhead while
  * the song runs -- and stopped, where PLAY starts, which the top bar's
  * position moves a bar a detent. REC and DUB on the top bar record the pads
- * onto the seq track from there (ISongEngine::recordSeq): a REC becomes a
- * block of its own notes as many bars long as it ran -- the playhead then
- * stands where it stopped, so the next REC is the next part -- and a DUB adds
+ * onto the armed seq track from there -- ARM, the dot on a seq track's
+ * header, which is also whose kit the pads play here (ISongEngine::recordSeq,
+ * AudioSong::armed; SecondKitPadLogic for the second kit): a REC becomes a
+ * block of its own notes as many bars long as it ran -- a STOP puts the
+ * playhead back on bar one, the next PLAY's downbeat -- and a DUB adds
  * to the blocks it plays over; with LOOP over a region the take goes round
  * it. Seq blocks are moved, copied (each copy its own from its first edit),
  * cut and deleted by bars like the audio, and drawn from their notes. A seq
@@ -28,10 +30,11 @@
  *          is, SYNC (the sequencer plays along, locked to the song's bars and
  *          tempo), LOOP, ZOOM. No back button and no PLAY: back is the power
  *          button's click, the transport is the bar above
- *   lanes  a header per track -- its number and what it holds, AUD / KIT /
- *          PITCH, in the colour of the app that makes it (tap: pick the
- *          track and open its menu -- BOUNCE a seq to audio, DELETE; hold:
- *          MIX) -- the timeline beside them, and under the last of them
+ *   lanes  a header per track -- its number and what it holds, AUD / the
+ *          kit's name / PITCH, in the colour of the app that makes it, ARM
+ *          on a seq track (tap: pick the track and open its menu -- BOUNCE a
+ *          seq to audio, its KIT, DELETE; hold: MIX) -- the timeline beside
+ *          them, and under the last of them
  *          "+ ADD TRACK" while there is room
  *   keys   MOVE, DUP and DEL act on the selected block; EDIT is the song's
  *          own editing (below). CLIP EDIT opens the selected track where it
@@ -80,6 +83,9 @@
 #include "crosspad/sequencer/SequencerController.hpp"
 #include "crosspad/instrument/IInstrumentHost.hpp"
 #include "crosspad/instrument/InstrumentPlayState.hpp"
+#include "crosspad/kit/IKitManager.hpp"
+#include "crosspad/kit/IKitPicker.hpp"
+#include "crosspad/sampler/ISecondKit.hpp"
 #include "crosspad/pad/PadManager.hpp"
 #include "crosspad/song/ArrangeFocus.hpp"
 #include "crosspad/song/ISongEngine.hpp"
@@ -166,8 +172,8 @@ constexpr int32_t  kLaneH    = 30;     // the export's 31, less the ruler's pixe
  * does not have already pushes this block 14 px down; it must not also push
  * it into the keys. */
 constexpr int32_t  kLaneGap  = 2;
-/* 80: the export's track head, variant A -- the number in its type's colour
- * over the name, S over M at the right edge. The lanes start on its LANE_X 88
+/* 80: the export's track head, variant A -- the number in its type's colour,
+ * S, M and a seq track's ARM on its line, the name under them. The lanes start on its LANE_X 88
  * and end before the meters, on 302. */
 constexpr int32_t  kHeadW    = 80;
 constexpr int32_t  kMeterW   = 10;     ///< a track's stereo meter, beside the lanes
@@ -197,12 +203,13 @@ const lv_color_t kWell   = lv_color_hex(0x1B1E22);     // S / M off, a meter's w
 const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
- * Arrange holds four tracks: four audio, or one seq and three audio. A track
- * comes from the "+ ADD TRACK" row -- AUDIO opens the Recorder to record into
- * it, SEQ asks what it plays through and opens the sequencer on it -- and any
- * track can be bounced to audio at any time, which is also the only way to
- * free the one seq slot for the next idea. The three colours are the ones
- * those three screens already use, so a badge here names the app it opens. */
+ * Arrange holds four tracks, up to two of them seqs: two kit tracks, a kit
+ * each, or one Pitch track (AudioSong::freeSeqRoute()). A track comes from
+ * the "+ ADD TRACK" row -- AUDIO opens the Recorder to record into it, SEQ
+ * asks what it plays through and opens the sequencer on it -- and any track
+ * can be bounced to audio at any time, which is also how a seq slot is freed
+ * for the next idea. The three colours are the ones those three screens
+ * already use, so a badge here names the app it opens. */
 const lv_color_t kAudioT = lv_color_hex(0x4EA6D3);    // AUD   -- the Recorder's blue
 const lv_color_t kKitT   = lv_color_hex(0xFFC857);    // KIT   -- the Sampler's amber
 const lv_color_t kPitchT = lv_color_hex(0xA77BF0);    // PITCH -- Pitch Play's purple
@@ -217,6 +224,27 @@ const char* track_badge(const crosspad::SongTrack& t)
 {
     if (t.kind != crosspad::TrackKind::Seq) return "AUD";
     return t.source == crosspad::SeqSource::Pitch ? "PITCH" : "KIT";
+}
+
+/// The kit list's name for @p kitPath, or "" when the card has no such kit.
+std::string kit_name(const std::string& kitPath)
+{
+    crosspad::IKitManager* km = crosspad::getKitManager();
+    if (!km || kitPath.empty()) return {};
+    for (int i = 0; i < km->getKitCount(); ++i) {
+        const crosspad::KitInfo* k = km->getKit(i);
+        if (k && k->path == kitPath) return k->name;
+    }
+    return {};
+}
+
+/// The kit seq track @p t plays: its own on the second kit's route, else the
+/// song's. Empty for any other track.
+std::string track_kit(const crosspad::AudioSong& song, int t)
+{
+    const int route = song.seqRoute(t);
+    if (route < 0 || song.tracks[t].source != crosspad::SeqSource::Kit) return {};
+    return route == 1 ? song.tracks[t].kit : song.kit;
 }
 
 /* A block drawn, and its clip's waveform once the engine has it. */
@@ -258,6 +286,7 @@ lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headMute[kTracks] = {};
 lv_obj_t* s_headSolo[kTracks] = {};
+lv_obj_t* s_headArm[kTracks] = {};   ///< ARM, a seq track's: REC takes onto it, the pads play its kit
 /// A track's stereo meter beside the lanes: its well, ten segments a side.
 lv_obj_t* s_meterWell[kTracks] = {};
 lv_obj_t* s_meterSeg[kTracks][2][kMeterSegs] = {};
@@ -286,6 +315,9 @@ uint32_t  s_drawnBars = 0;
 int       s_bouncing = -1;
 /* A Pitch seq track's sound (sound_keeper_cb, by Arrange_create). */
 constexpr const char* kSoundLogic = "ArrangePitch";
+/* The second kit's pads, while its track is armed (sound_keeper_cb). */
+constexpr const char* kKit2Logic = "ArrangeKit2";
+bool        s_kit2Pads     = false;   ///< kKit2Logic is pushed
 lv_timer_t* s_soundTimer   = nullptr;
 bool        s_visible      = false;   ///< this screen is the one on top
 bool        s_soundHeld    = false;   ///< the instrument was borrowed for the song
@@ -395,7 +427,10 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     mix(s.loopEnd);
     mix(s.loop);
     mix((uint32_t)lroundf(s.bpm * 100.0f));     // where each clip's waveform falls on the bars
+    /* The kit badges: a kit loaded in the kit browser is the song's too. */
+    for (char c : s.kit) mix((uint8_t)c);
     for (int t = 0; t < kTracks; ++t) {
+        for (char c : s.tracks[t].kit) mix((uint8_t)c);
         mix(0xABCDu + t);
         mix(s.tracks[t].muted);
         mix(s.tracks[t].solo);
@@ -788,10 +823,9 @@ void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
     set_bg(b, on ? col : kWell);
     set_ink(lv_obj_get_child(b, 0), on ? kInk : kDim);
 }
-void head_mute_cb(lv_event_t* e);
-void head_solo_cb(lv_event_t* e);
 void toggle_mute(int t);
 void toggle_solo(int t);
+void arm_track(int t);
 
 void rebuild_timeline()
 {
@@ -1029,17 +1063,25 @@ void rebuild_timeline()
         s_trackQuiet[t] = song.silenced(t);
         set_ink(s_headNum[t], track_color(tr));
         if (s_headName[t]) {
-            set_text(s_headName[t], tr.name.empty() ? track_badge(tr) : tr.name.c_str());
-            set_ink(s_headName[t], s_trackQuiet[t] || tr.name.empty() ? kDim : kText);
+            /* A kit track without a name of its own says its kit's: with two
+             * of them, which is which is the first thing to know. */
+            const std::string kit = tr.name.empty() ? kit_name(track_kit(song, t)) : std::string();
+            set_text(s_headName[t], !tr.name.empty() ? tr.name.c_str() : !kit.empty() ? kit.c_str() : track_badge(tr));
+            set_ink(s_headName[t], s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);
+        if (s_headArm[t]) {
+            const bool seq = song.seqRoute(t) >= 0;
+            if (seq) lv_obj_remove_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
+            else     lv_obj_add_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
+            set_bg(s_headArm[t], seq && song.armedSeqTrack() == t ? kRec : kWell);
+        }
     }
 
     /* "+ ADD TRACK", in the slot of the first track nobody has made -- and
      * gone once all four are. The counter beside it is the rule the player
-     * needs before choosing: how many tracks are left, and whether the one
-     * seq slot is free. */
+     * needs before choosing: how many tracks are left, and how many seqs. */
     if (s_addRow) {
         if (used >= kTracks) {
             lv_obj_add_flag(s_addRow, LV_OBJ_FLAG_HIDDEN);
@@ -1227,9 +1269,9 @@ void tick_cb(lv_timer_t*)
             s_bouncing = -1;
             if (st.state == crosspad::BounceState::Done) {
                 /* The engine wrote the WAV, put its block on this track and
-                 * made the track audio, which frees the seq slot. */
+                 * made the track audio, which frees its seq slot. */
                 rebuild_timeline();
-                note_fmt("Track %d is audio now -- the seq slot is free.", track + 1);
+                note_fmt("Track %d is audio now -- its seq slot is free.", track + 1);
             } else if (!st.error.empty()) {
                 note_fmt("Not bounced: %s.", st.error.c_str());
             } else {
@@ -1461,8 +1503,18 @@ void scroll_to_selected()
 /// cannot play, and a seq block is its track's scene (UX 2000 section 7.1).
 int move_target(const crosspad::AudioSong& song, int from, int dir)
 {
-    /* There is one seq track, so a seq block has nowhere else to go. */
-    if (song.tracks[from].kind != crosspad::TrackKind::Audio) return -1;
+    const auto& src = song.tracks[from];
+    if (src.kind != crosspad::TrackKind::Audio) {
+        /* A seq block goes to the other kit track and plays its notes through
+         * that track's kit. One that plays its track's scene has no notes of
+         * its own to take along, so it stays. */
+        const bool own = s_selIndex >= 0 && s_selIndex < (int)src.clips.size() && src.clips[(size_t)s_selIndex].notes;
+        if (src.source != crosspad::SeqSource::Kit || !own) return -1;
+        for (int t = from + dir; t >= 0 && t < kTracks; t += dir) {
+            if (song.seqRoute(t) >= 0 && song.tracks[t].source == crosspad::SeqSource::Kit) return t;
+        }
+        return -1;
+    }
     for (int t = from + dir; t >= 0 && t < kTracks; t += dir) {
         const auto& tr = song.tracks[t];
         if (tr.inUse && tr.kind == crosspad::TrackKind::Audio) return t;
@@ -1800,6 +1852,28 @@ lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, void* ud, bool accent
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, b);
 #endif
+    return b;
+}
+
+/// A menu of keys rather than rows: two a row, as tall as a dialog's keys
+/// (BOUNCE, CANCEL) -- a menu that is touched more than it is turned.
+lv_obj_t* overlay_keys(const char* title)
+{
+    overlay_list(title);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_column(s_overlay, 4, 0);
+    lv_obj_set_style_pad_row(s_overlay, 4, 0);
+    lv_obj_set_width(lv_obj_get_child(s_overlay, 0), LV_PCT(100));
+    return s_overlay;
+}
+
+constexpr int32_t kMenuKeyW = (320 - 2 * 6 - 4) / 2;   ///< half the overlay, less its gap
+constexpr int32_t kMenuKeyH = 36;
+
+lv_obj_t* overlay_key(const char* text, lv_event_cb_t cb, void* ud = nullptr)
+{
+    lv_obj_t* b = overlay_item(text, cb, ud);
+    lv_obj_set_size(b, kMenuKeyW, kMenuKeyH);
     return b;
 }
 
@@ -2763,10 +2837,12 @@ void edit_cb(lv_event_t*)
  *                      |                      |
  *                      +--> the Recorder       +--> the sequencer on its scene
  *
+ *                                  (KIT: the kit loader first)
+ *
  * Every dialog says the same two things, because they are the rules a player
  * has to know before choosing and nobody reads them anywhere else: four
- * tracks, four audio or one seq and three audio -- and any track can be
- * bounced to audio at any time, which is also how the seq slot comes free.
+ * tracks, up to two seqs -- two kits, or one Pitch -- and any track can be
+ * bounced to audio at any time, which is also how a seq slot comes free.
  */
 
 /// A sheet over the timeline: the overlay machinery (its own encoder group,
@@ -2874,6 +2950,7 @@ void sheet_keys(const char* const* labels, const lv_event_cb_t* cbs, int n)
 void new_track_sheet();
 void seq_source_sheet();
 void open_seq_track(int track);
+void pick_kit_for(int track);
 
 /// Is the selected track one that holds a seq? What a bounce needs.
 bool selected_is_seq()
@@ -2923,12 +3000,14 @@ void choose_seq_cb(lv_event_t*)
     seq_source_sheet();
 }
 
-void choose_source_cb(lv_event_t* e)
+/// A seq track on @p src on the lowest free track, playing @p kit (see
+/// AudioSong::addSeqTrack()), armed -- the newest track is the one played
+/// into next. Its index, or -1 when there is no room for it.
+int make_seq_track(crosspad::SeqSource src, const std::string& kit)
 {
-    const auto src = (crosspad::SeqSource)(intptr_t)lv_event_get_user_data(e);
     auto* se = engine();
     auto* sq = crosspad::getPlatformServices().sequencer;
-    if (!se) return;
+    if (!se) return -1;
     /* A scene of its own, so the track keeps playing what was put on it when
      * the player switches scenes somewhere else. A kit with no room left for
      * another scene lends this track the one that is current -- better than
@@ -2940,17 +3019,100 @@ void choose_source_cb(lv_event_t* e)
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();
         made = song.freeTrack();
-        if (made < 0 || !song.addSeqTrack(made, src, scene)) made = -1;
+        if (made < 0 || !song.addSeqTrack(made, src, scene, kit)) made = -1;
         /* A song that starts as a seq track has no clip to take its tempo
          * from: its grid is the sequencer's, or the two drift apart. */
         if (made >= 0 && song.bpm <= 0.0f && sq) song.bpm = sq->getBpm();
+        if (made >= 0) song.armed = (int8_t)made;
     }
+    if (made >= 0) se->commit();
+    return made;
+}
+
+void choose_source_cb(lv_event_t* e)
+{
+    const auto src = (crosspad::SeqSource)(intptr_t)lv_event_get_user_data(e);
     close_overlay();
-    if (made < 0) { note("No room: all four tracks are in use, or the seq slot is taken."); return; }
-    se->commit();
+    /* A kit track plays the kit picked for it. */
+    if (src == crosspad::SeqSource::Kit) { pick_kit_for(-1); return; }
+    const int made = make_seq_track(src, {});
+    if (made < 0) { note("No room: all four tracks are in use, or a seq is already in the song."); return; }
     select(made, -1);
     rebuild_timeline();
     open_seq_track(made);
+}
+
+// ── a kit track's kit ──────────────────────────────────────────────────────
+/*
+ * The kit loader -- the board's kit browser (IKitPicker) -- for a new kit
+ * track or one whose kit changes. On the pads' route (the first kit track)
+ * the kit picked is the song's -- what the pads and the Sampler play, loaded
+ * as a song's kit is; on the second it is the track's own, which the second
+ * kit engine loads beside it. A pitched kit has an engine of its own that
+ * takes the arena from both, so it is no second kit. The browser is up while
+ * this screen is down: the pick changes the song, and the screen, back, opens
+ * a new track's seq view (s_afterPick).
+ */
+
+int s_kitPickTrack = -1;   ///< the track the kit loader picks for; -1 a new one
+int s_afterPick    = -1;   ///< a track made by the pick: its seq view once this screen is back
+
+void kit_picked(const std::string& path, void*)
+{
+    auto* se = engine();
+    if (!se) return;
+    crosspad::IKitManager* km = crosspad::getKitManager();
+    bool pitched = false;
+    for (int i = 0; km && i < km->getKitCount(); ++i) {
+        const crosspad::KitInfo* k = km->getKit(i);
+        if (k && k->path == path) pitched = k->engine == crosspad::KitEngine::Pitched;
+    }
+    const int track = s_kitPickTrack;
+    bool second = false;   // a second kit plays beside this one, or would be this one
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        const int route = track < 0 ? song.freeSeqRoute(crosspad::SeqSource::Kit) : song.seqRoute(track);
+        second = route == 1 || song.seqTrackOnRoute(1) >= 0;
+    }
+    /* A toast, not this screen's note: the screen is down while the loader is up. */
+    if (pitched && second) {
+        ui_toast_show("A pitched kit plays alone: it cannot be a second kit.", 3000, UI_TOAST_WARNING);
+        return;
+    }
+    if (track < 0) {
+        s_afterPick = make_seq_track(crosspad::SeqSource::Kit, path);
+        if (s_afterPick < 0) ui_toast_show("No room: all four tracks are in use, or both kit tracks are.", 3000, UI_TOAST_WARNING);
+        return;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        if (song.seqRoute(track) == 1)      song.tracks[track].kit = path;
+        else if (song.seqRoute(track) == 0) song.kit = path;
+        else                                return;
+    }
+    se->commit();
+}
+
+void pick_kit_for(int track)
+{
+    auto* se = engine();
+    if (!se) return;
+    int route = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        route = track < 0 ? song.freeSeqRoute(crosspad::SeqSource::Kit) : song.seqRoute(track);
+    }
+    if (route < 0) { note("No room for another kit track."); return; }
+    if (!crosspad::getPlatformServices().kitPicker) { note("No kit loader in this firmware."); return; }
+    s_kitPickTrack = track;
+    /* Not inside this screen's own click: the browser takes the screen down. */
+    lv_async_call([](void*) {
+        crosspad::IKitPicker* picker = crosspad::getPlatformServices().kitPicker;
+        if (!picker || !picker->open(&kit_picked, nullptr)) note("The kit loader cannot open now.");
+    }, nullptr);
 }
 
 /// A seq track's screen, on its scene and knowing it came from here: a Pitch
@@ -3005,7 +3167,7 @@ void new_track_sheet()
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         used = se->song().usedTracks();
-        seqFree = se->song().seqSlotFree();
+        seqFree = se->song().seqSlotFree() || se->song().freeSeqRoute(crosspad::SeqSource::Pitch) >= 0;
     }
     if (used >= kTracks) { note("All four tracks are in use."); return; }
 
@@ -3021,11 +3183,11 @@ void new_track_sheet()
     sheet_card(4, "AUDIO", "Audio", "a recorded or loaded loop,", "plays as clips",
                kAudioT, true, choose_audio_cb, nullptr);
     sheet_card(164, "SEQ", "Seq",
-               seqFree ? "pads recorded as notes," : "the seq slot is taken:",
-               seqFree ? "editable, any sound"     : "bounce it to free it",
+               seqFree ? "pads recorded as notes," : "both seq slots are taken:",
+               seqFree ? "editable, any sound"     : "bounce one to free it",
                kAccent, seqFree, choose_seq_cb, nullptr);
 
-    sheet_rules("Arrange holds 4 tracks: 4 audio, or 1 seq + 3 audio.",
+    sheet_rules("Arrange holds 4 tracks, up to 2 seq: 2 kits, or 1 Pitch.",
                 "Any track can be bounced to audio at any time.");
     static const char* kLabels[] = {"CANCEL"};
     static const lv_event_cb_t kCbs[] = {cancel_sheet_cb};
@@ -3036,23 +3198,34 @@ void seq_source_sheet()
 {
     auto* se = engine();
     if (!se || s_overlay) return;
-    int used = 0;
+    int used = 0, kitRoute = -1, pitchRoute = -1;
+    bool pitchThere = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        used = se->song().usedTracks();
+        const auto& song = se->song();
+        used = song.usedTracks();
+        kitRoute = song.freeSeqRoute(crosspad::SeqSource::Kit);
+        pitchRoute = song.freeSeqRoute(crosspad::SeqSource::Pitch);
+        pitchThere = song.hasPitchTrack();
     }
     sheet_open();
     char title[48];
     std::snprintf(title, sizeof(title), "Seq track %d  -  plays with", used + 1);
     sheet_text(s_overlay, 8, ARR_Y(36), title, &lv_font_montserrat_16, kText);
 
-    sheet_card(4, "SAMPLER", "Kit", "16 pads, one sample each:", "drums, chops",
-               kKitT, true, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Kit);
-    sheet_card(164, "PITCH PLAY", "Pitch", "one sample in pitch:", "bass, keys, melody",
-               kPitchT, true, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Pitch);
+    const bool kit = kitRoute >= 0, pitch = pitchRoute >= 0;
+    sheet_card(4, "SAMPLER", kitRoute == 1 ? "Kit 2" : "Kit",
+               kitRoute == 1 ? "a second kit, its own:" : kit ? "16 pads, one sample each:"
+                             : pitchThere ? "a Pitch track plays alone:" : "two kit tracks already:",
+               kitRoute == 1 ? "five voices each kit" : kit ? "drums, chops"
+                             : pitchThere ? "bounce it for a kit" : "bounce one to free it",
+               kKitT, kit, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Kit);
+    sheet_card(164, "PITCH PLAY", "Pitch", pitch ? "one sample in pitch:" : "plays alone in a song:",
+               pitch ? "bass, keys, melody" : "bounce the seqs first",
+               kPitchT, pitch, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Pitch);
 
-    sheet_rules("Pitch opens Pitch Play; Kit opens the seq view.",
-                "Bounce turns the seq into audio and frees the slot.");
+    sheet_rules("Kit: pick its kit, then the seq view. Pitch: Pitch Play.",
+                "Bounce turns a seq into audio and frees its slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
     sheet_keys(kLabels, kCbs, 2);
@@ -3066,13 +3239,20 @@ void bounce_go_cb(lv_event_t*)
     if (!se) return;
     /* A Pitch track is bounced through its instrument, so it has to be in:
      * notes before the bank is built would be silence in the clip. */
-    bool pitch = false;
+    bool pitch = false, second = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         pitch = se->song().tracks[track].source == crosspad::SeqSource::Pitch;
+        second = se->song().seqRoute(track) == 1;
     }
     if (pitch && !crosspad::seqTrackSound().pitch.ready()) {
         note("The track's instrument is still loading -- BOUNCE again in a moment.");
+        return;
+    }
+    /* The second kit is bounced through its engine, which loads on its own. */
+    crosspad::ISecondKit* kit2 = crosspad::getPlatformServices().secondKit;
+    if (second && (!kit2 || kit2->state() != crosspad::ISecondKit::State::Ready)) {
+        note("The track's kit is still loading -- BOUNCE again in a moment.");
         return;
     }
     /* The scene looped over the whole song -- what the track plays -- into
@@ -3150,7 +3330,7 @@ void bounce_sheet()
     char title[32];
     std::snprintf(title, sizeof(title), "Bounce T%d to audio?", s_selTrack + 1);
     confirm_sheet(title, "The notes become one audio clip on this track.",
-                  "The seq slot is free again for a new idea.", kAccent,
+                  "Its seq slot is free again for a new idea.", kAccent,
                   kKitT, kInk, "BOUNCE", bounce_go_cb);
 }
 
@@ -3309,32 +3489,47 @@ void track_menu()
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
-    bool seq = false, muted = false, solo = false;
+    bool seq = false, muted = false, solo = false, armed = false;
     crosspad::StretchMode stretch = crosspad::StretchMode::Off;
     char title[32];
+    std::string kit;
+    bool kitTrack = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& t = se->song().tracks[s_selTrack];
+        const auto& song = se->song();
+        const auto& t = song.tracks[s_selTrack];
         if (!t.inUse) return;
         seq = t.kind == crosspad::TrackKind::Seq;
         stretch = t.stretch;
         muted = t.muted;
         solo = t.solo;
+        armed = seq && song.armedSeqTrack() == s_selTrack;
+        kitTrack = seq && t.source == crosspad::SeqSource::Kit;
+        if (kitTrack) kit = kit_name(track_kit(song, s_selTrack));
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
     }
-    overlay_list(title);
-    if (seq) overlay_item(LV_SYMBOL_AUDIO " Bounce to audio ...", [](lv_event_t*) { close_overlay(); bounce_sheet(); }, nullptr);
-    else overlay_item(stretch == crosspad::StretchMode::KeepPitch ? LV_SYMBOL_SHUFFLE " Time stretch: STRETCH ..."
-                      : stretch == crosspad::StretchMode::Repitch ? LV_SYMBOL_SHUFFLE " Time stretch: REPITCH ..."
-                                                                  : LV_SYMBOL_SHUFFLE " Time stretch: OFF ...",
-                      [](lv_event_t*) { close_overlay(); stretch_sheet(); }, nullptr);
-    overlay_item(muted ? LV_SYMBOL_MUTE " Mute: ON" : LV_SYMBOL_VOLUME_MAX " Mute: OFF",
-                 [](lv_event_t*) { close_overlay(); toggle_mute(s_selTrack); }, nullptr);
-    overlay_item(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
-                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); }, nullptr);
-    overlay_item(LV_SYMBOL_EDIT " Rename track ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); }, nullptr);
-    overlay_item(LV_SYMBOL_TRASH " Delete track ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); }, nullptr);
-    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+    overlay_keys(title);
+    if (kitTrack) {
+        char item[64];
+        std::snprintf(item, sizeof(item), LV_SYMBOL_DRIVE " %s", kit.empty() ? "Kit ..." : kit.c_str());
+        overlay_key(item, [](lv_event_t*) { close_overlay(); pick_kit_for(s_selTrack); });
+    }
+    if (seq) {
+        overlay_key(armed ? LV_SYMBOL_OK " Armed" : LV_SYMBOL_PLUS " Arm for REC",
+                    [](lv_event_t*) { close_overlay(); arm_track(s_selTrack); });
+    }
+    if (seq) overlay_key(LV_SYMBOL_AUDIO " Bounce ...", [](lv_event_t*) { close_overlay(); bounce_sheet(); });
+    else overlay_key(stretch == crosspad::StretchMode::KeepPitch ? LV_SYMBOL_SHUFFLE " Stretch"
+                     : stretch == crosspad::StretchMode::Repitch ? LV_SYMBOL_SHUFFLE " Repitch"
+                                                                 : LV_SYMBOL_SHUFFLE " Stretch: OFF",
+                     [](lv_event_t*) { close_overlay(); stretch_sheet(); });
+    overlay_key(muted ? LV_SYMBOL_MUTE " Mute: ON" : LV_SYMBOL_VOLUME_MAX " Mute: OFF",
+                [](lv_event_t*) { close_overlay(); toggle_mute(s_selTrack); });
+    overlay_key(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
+                [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); });
+    overlay_key(LV_SYMBOL_EDIT " Rename ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); });
+    overlay_key(LV_SYMBOL_TRASH " Delete ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); });
+    overlay_key(LV_SYMBOL_CLOSE " Cancel", cancel_cb);
 }
 
 /// CLIP EDIT: the selected track, in the app that makes it.
@@ -3522,8 +3717,20 @@ void toggle_solo(int t)
     se->commit();
 }
 
-void head_mute_cb(lv_event_t* e) { toggle_mute((int)(intptr_t)lv_event_get_user_data(e)); }
-void head_solo_cb(lv_event_t* e) { toggle_solo((int)(intptr_t)lv_event_get_user_data(e)); }
+/// ARM: REC and DUB take onto @p t, and the pads play its kit here.
+void arm_track(int t)
+{
+    auto* se = engine();
+    if (!se || t < 0 || t >= kTracks) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        if (song.seqRoute(t) < 0 || song.armed == t) return;
+        song.armed = (int8_t)t;
+    }
+    se->commit();
+    rebuild_timeline();
+}
 
 /// A track's strip, as on a desk: its number, a tall fader, the dB, M.
 void mix_strip(lv_obj_t* strips, int t, float volume)
@@ -3649,6 +3856,21 @@ bool song_has_pitch_track()
     return false;
 }
 
+/// The pads play the second kit: its track armed with this screen up, or
+/// the seq view open on that track.
+bool kit2_pads_wanted()
+{
+    auto* se = engine();
+    if (!se || !crosspad::getPlatformServices().secondKit) return false;
+    const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+    crosspad_gui::ILvglApp* fg = crosspad_gui::AppOrchestrator::getInstance().getForegroundApp();
+    const bool seqView = f.held() && f.seq && fg && std::strcmp(fg->getName(), "Sequencer") == 0;
+    if (!s_visible && !seqView) return false;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    const auto& song = se->song();
+    return song.seqRoute(seqView ? f.track : song.armedSeqTrack()) == 1;
+}
+
 void sound_keeper_cb(lv_timer_t*)
 {
     auto& ts = crosspad::seqTrackSound();
@@ -3693,6 +3915,17 @@ void sound_keeper_cb(lv_timer_t*)
         s_soundPads = false;
     }
 
+    /* The second kit's pads: here while its track is armed, and in the seq
+     * view of one of its blocks -- what is played is what the take keeps. */
+    const bool kit2Wanted = kit2_pads_wanted() && !crosspad_gui::mode_overlay_is_open();
+    if (kit2Wanted && !s_kit2Pads) {
+        pm.pushPadLogic(kKit2Logic);
+        s_kit2Pads = true;
+    } else if (!kit2Wanted && s_kit2Pads && pm.getActivePadLogic() == kKit2Logic) {
+        pm.popPadLogic();
+        s_kit2Pads = false;
+    }
+
     if (!want && s_soundHeld) {
         s_soundHeld = false;
         /* Not out from under the screen that plays it now: Pitch Play and the
@@ -3711,6 +3944,9 @@ void sound_keeper_start()
     crosspad::getPadManager().registerPadLogic(
         kSoundLogic, std::shared_ptr<crosspad::IPadLogicHandler>(&crosspad::seqTrackSound().pitch,
                                                                  [](crosspad::IPadLogicHandler*) {}));
+    crosspad::getPadManager().registerPadLogic(
+        kKit2Logic, std::shared_ptr<crosspad::IPadLogicHandler>(&crosspad::seqTrackSound().kit2,
+                                                                [](crosspad::IPadLogicHandler*) {}));
     s_soundTimer = lv_timer_create(sound_keeper_cb, 100, nullptr);
 }
 
@@ -3738,11 +3974,11 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * No back button and no PLAY: back is the power button's click, and the
      * transport is the bar above. ZOOM takes the place the two zoom keys had
      * on the tool row, which is where the export puts it. */
-    s_projBtn = make_button(s_root, 54, "", project_cb);
+    s_projBtn = make_button(s_root, 58, "", project_cb);
     place(s_projBtn, 6, ARR_Y(35));
     s_projLabel = lv_obj_get_child(s_projBtn, 0);
     lv_label_set_long_mode(s_projLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_projLabel, 48);
+    lv_obj_set_width(s_projLabel, 52);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
     /* The export's dim "18 bars". It carries this screen's status line too:
@@ -3752,7 +3988,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * for them. */
     s_posLabel = lv_label_create(s_root);
     lv_obj_set_width(s_posLabel, 42);
-    place(s_posLabel, 63, ARR_Y(40));
+    place(s_posLabel, 67, ARR_Y(40));
     lv_obj_set_style_text_font(s_posLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_posLabel, kDim, 0);
     lv_obj_set_style_text_align(s_posLabel, LV_TEXT_ALIGN_RIGHT, 0);
@@ -3766,18 +4002,18 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     /* EDIT here is the timeline's: the loop region, copy / paste, merging,
      * the song's length, a clip from the library (edit_cb). The key at the
      * foot is the clip's (clip_edit_cb). */
-    /* FOLLOW beside the position it follows; the keys after it a little
-     * narrower than the export's, to make the room. */
-    s_followBtn = make_button(s_root, 42, "FOLLOW", follow_cb);
-    place(s_followBtn, 108, ARR_Y(35));
-    s_editBtn = make_button(s_root, 36, "EDIT", edit_cb);
-    place(s_editBtn, 153, ARR_Y(35));
-    s_syncBtn = make_button(s_root, 40, "SYNC", sync_cb);
-    place(s_syncBtn, 192, ARR_Y(35));
-    s_loopBtn = make_button(s_root, 40, "LOOP", loop_cb);
-    place(s_loopBtn, 235, ARR_Y(35));
-    s_zoomBtn = make_button(s_root, 38, "ZOOM", zoom_cycle_cb);
-    place(s_zoomBtn, 278, ARR_Y(35));
+    /* FOLLOW, an arrow beside the position it follows; the keys after it a
+     * little narrower than the export's, to make the room. */
+    s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
+    place(s_followBtn, 112, ARR_Y(35));
+    s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
+    place(s_editBtn, 139, ARR_Y(35));
+    s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
+    place(s_syncBtn, 180, ARR_Y(35));
+    s_loopBtn = make_button(s_root, 42, "LOOP", loop_cb);
+    place(s_loopBtn, 225, ARR_Y(35));
+    s_zoomBtn = make_button(s_root, 42, "ZOOM", zoom_cycle_cb);
+    place(s_zoomBtn, 270, ARR_Y(35));
 
     /* ── lanes: the track buttons fixed, the timeline scrolling beside them ──
      * The export's LANE_X=48 and a lane block from screen y=62 to 200. */
@@ -3811,9 +4047,10 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
          * keys and MIX is not one of them, so it moved to the one gesture
          * these buttons were not using -- and the association is exact. */
         lv_obj_add_event_cb(h, mix_cb, LV_EVENT_LONG_PRESSED, nullptr);
-        /* "01" in the type's colour over the name; S over M on the right
-         * edge, touched there -- the encoder reaches both in the header's
-         * menu, so the group keeps one stop a track. */
+        /* One line over the name: "01" in the type's colour, S and M beside
+         * it, then ARM on a seq track. They only show: a touch anywhere on the
+         * header opens its menu, where all three are keys -- small buttons
+         * side by side were hit for one another. */
         lv_obj_t* l = lv_label_create(h);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(l, kAudioT, 0);
@@ -3823,23 +4060,20 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(name, kText, 0);
         lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
-        lv_obj_set_width(name, 54);
+        lv_obj_set_width(name, kHeadW - 10);
         lv_label_set_text(name, "");
         lv_obj_set_pos(name, 5, 13);
-        auto toggle = [&](int32_t y, const char* text, lv_event_cb_t cb) {
+        auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
             lv_group_remove_obj(b);
-            lv_obj_set_size(b, 14, 12);
-            lv_obj_set_pos(b, 62, y);
+            lv_obj_set_size(b, 14, 11);
+            lv_obj_set_pos(b, x, 1);
             lv_obj_set_style_radius(b, 3, 0);
             lv_obj_set_style_bg_color(b, kWell, 0);
             lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
             lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_set_ext_click_area(b, 4);
-            /* A child's click does not bubble: it never opens the menu. */
-            lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+            lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);   // the header's touch, not its own
             lv_obj_t* bl = lv_label_create(b);
             lv_obj_set_style_text_font(bl, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(bl, kDim, 0);
@@ -3847,8 +4081,23 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
             lv_obj_center(bl);
             return b;
         };
-        s_headSolo[t] = toggle(3, "S", head_solo_cb);
-        s_headMute[t] = toggle(17, "M", head_mute_cb);
+        s_headSolo[t] = toggle(20, "S");
+        s_headMute[t] = toggle(38, "M");
+        /* ARM, a seq track's only: a dot after M, red while REC takes onto
+         * the track and the pads play its kit. */
+        lv_obj_t* arm = lv_obj_create(h);
+        lv_obj_remove_style_all(arm);
+        lv_group_remove_obj(arm);
+        lv_obj_set_size(arm, 10, 10);
+        lv_obj_set_pos(arm, 57, 1);
+        lv_obj_set_style_radius(arm, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(arm, kWell, 0);
+        lv_obj_set_style_bg_opa(arm, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(arm, kRec, 0);
+        lv_obj_set_style_border_width(arm, 1, 0);
+        lv_obj_remove_flag(arm, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(arm, LV_OBJ_FLAG_CLICKABLE);
+        s_headArm[t] = arm;
         s_heads[t] = h;
         s_headNum[t] = l;
         s_headName[t] = name;
@@ -4047,6 +4296,15 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 #ifdef ARR_USE_ENCODER
             if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
+            /* Back from the kit loader with a new kit track: its seq view, as
+             * a track made here opens. */
+            if (s_afterPick >= 0) {
+                const int made = s_afterPick;
+                s_afterPick = -1;
+                select(made, -1);
+                rebuild_timeline();
+                lv_async_call([](void* p) { open_seq_track((int)(intptr_t)p); }, (void*)(intptr_t)made);
+            }
             /* Sent here by the seq view's BOUNCE: the question, on its track. */
             crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
             if (f.held() && f.bounce) {
