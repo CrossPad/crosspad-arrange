@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.6.0,<3.0.0",
+    "crosspad-core": ">=2.7.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.17.1: a new kit or Pitch track takes the scene just added (AudioSong::sceneForNewSeq), not the sequencer's active one -- while the transport ran that was still the Drums track's, and adding a Slice track moved the Drums notes onto it. Requires core 2.7.",
     "0.17.0: + ADD TRACK offers AUDIO or KITS; KITS is PERF, DRUMS, SLICE or PITCH, two by two, each kit picked from the browser's list of its kind. A Pitch track plays beside two kit tracks (core 2.6: its own route), so a song holds Drums, Slice, Pitch and audio at once; the pads play the Pitch instrument only while its track is armed. Requires core 2.6.",
     "0.16.0: two kit tracks, each playing a kit of its own -- ADD TRACK > SEQ > Kit opens the kit loader (the first kit track's kit is the song's, the one the pads and the Sampler play; the second's is its own, in a second engine beside it), and a kit track's menu opens it again to change it. While two kits are up each plays five voices, the ten the card streams cleanly. ARM, the dot on a seq track's header after S and M, which sit on the number's line now -- all three only show, a touch on the header opens its menu, where they are keys: REC and DUB take onto the armed track, and here the pads play its kit. A kit track without a name shows its kit's. A block with notes of its own MOVEs between the two kit tracks. A track's menu is keys, two a row, as large as a dialog's BOUNCE and CANCEL, so it fits the screen and is easy to touch. FOLLOW is a right arrow, not the word, and the keys after it have most of their width back. Requires core 2.2.",
     "0.15.1: builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window; a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none)",

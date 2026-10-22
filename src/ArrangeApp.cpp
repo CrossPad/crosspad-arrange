@@ -3026,17 +3026,19 @@ int make_seq_track(crosspad::SeqSource src, const std::string& kit)
     auto* sq = crosspad::getPlatformServices().sequencer;
     if (!se) return -1;
     /* A scene of its own, so the track keeps playing what was put on it when
-     * the player switches scenes somewhere else. A kit with no room left for
-     * another scene lends this track the one that is current -- better than
-     * refusing the track. */
-    uint8_t scene = sq ? sq->getActiveScene() : 0;
-    if (sq && sq->addScene()) scene = sq->getActiveScene();
+     * the player switches scenes somewhere else -- the one just added, not
+     * the active one: while the transport runs that is still the old scene
+     * until the loop ends, another track's, and the new track's seq view
+     * cleared it and kept its notes (22.10.2026). With all eight there, the
+     * lowest scene no track plays. */
+    const bool added = sq && sq->addScene();
     int made = -1;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();
+        const int scene = song.sceneForNewSeq(sq ? sq->getSceneCount() : 1, added);
         made = song.freeTrack();
-        if (made < 0 || !song.addSeqTrack(made, src, scene, kit)) made = -1;
+        if (made < 0 || scene < 0 || !song.addSeqTrack(made, src, (uint8_t)scene, kit)) made = -1;
         /* A song that starts as a seq track has no clip to take its tempo
          * from: its grid is the sequencer's, or the two drift apart. */
         if (made >= 0 && song.bpm <= 0.0f && sq) song.bpm = sq->getBpm();
@@ -3162,9 +3164,12 @@ void open_seq_track(int track)
          * was made. Left as it was, the selection below is refused, the take
          * goes into whatever scene is up, and this track never plays it. */
         if (sq && t.scene >= sq->getSceneCount()) {
-            sq->addScene();
-            t.scene = sq->getActiveScene();
-            moved = true;
+            const bool added = sq->addScene();
+            const int scene = se->song().sceneForNewSeq(sq->getSceneCount(), added);
+            if (scene >= 0) {
+                t.scene = (uint8_t)scene;
+                moved = true;
+            }
         }
         f.clear();
         f.track  = track;
