@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.17.2",
+  "version": "0.17.3",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.17.3: a Pitch track's notes play whenever its instrument is up, whoever holds the screen -- the seq view of a Pitch block showed the notes and played nothing, with Arrange gone and the song stopped.",
     "0.17.2: the pads play an armed Slice (second kit) track again after the kit picker or the seq view -- a screen that popped past the pads' logic left Arrange believing it was still pushed. Requires core 2.8.",
     "0.17.1: a new kit or Pitch track takes the scene just added (AudioSong::sceneForNewSeq), not the sequencer's active one -- while the transport ran that was still the Drums track's, and adding a Slice track moved the Drums notes onto it. Requires core 2.8.",
     "0.17.0: + ADD TRACK offers AUDIO or KITS; KITS is PERF, DRUMS, SLICE or PITCH, two by two, each kit picked from the browser's list of its kind. A Pitch track plays beside two kit tracks (core 2.6: its own route), so a song holds Drums, Slice, Pitch and audio at once; the pads play the Pitch instrument only while its track is armed. Requires core 2.6.",

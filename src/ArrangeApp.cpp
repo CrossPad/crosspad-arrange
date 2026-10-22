@@ -3929,7 +3929,11 @@ void sound_keeper_cb(lv_timer_t*)
     } else {
         s_soundAsked = false;
     }
-    const bool ready = want && host->state() == crosspad::IInstrumentHost::State::Ready;
+    /* The route's notes play whenever the instrument is up, whoever holds the
+     * screen: the seq view of a Pitch block plays it with Arrange gone and
+     * the song stopped, and gated on `want` it was silent there. */
+    const bool ready = host && !path.empty() && song_has_pitch_track() &&
+                       host->state() == crosspad::IInstrumentHost::State::Ready;
     ts.pitch.setReady(ready);
 
     /* The fingers, here, while the Pitch track is armed: pushed only with the
