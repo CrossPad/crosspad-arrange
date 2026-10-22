@@ -3911,15 +3911,18 @@ bool kit2_pads_wanted()
 }
 
 /* Auto-freeze (ISongEngine::freezeTrack): the seq track ARM leaves -- another
- * armed in its place -- is frozen once the song stops, with this screen up
+ * armed in its place -- is frozen once the song has been stopped, and ARM
+ * left alone, for kFreezeQuietMs, with this screen up
  * (the seq view and Pitch Play use the sequencer a freeze takes), so the
  * tracks not being played cost a file's stream instead of an engine. One
- * already frozen as it is stays; PLAY cancels a freeze and it is made again
- * at the next stop. A song opened carries nothing over. */
+ * already frozen as it is stays; PLAY, REC and DUB cancel a freeze and it is
+ * made again at the next stop. A song opened carries nothing over. */
 std::string s_freezeSong;
 int         s_freezeArmed = -2;
 uint8_t     s_freezeWanted = 0;     ///< a bit per track
 int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
+uint32_t    s_freezeQuietAt = 0;    ///< lv_tick of the last ARM move or playback: a freeze waits kFreezeQuietMs
+constexpr uint32_t kFreezeQuietMs = 3000;   // a track added and recorded at once is not frozen first
 uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
 
 void auto_freeze(crosspad::ISongEngine* se)
@@ -3947,7 +3950,9 @@ void auto_freeze(crosspad::ISongEngine* se)
     if (armed != s_freezeArmed) {
         if (s_freezeArmed >= 0 && s_freezeArmed < kTracks) s_freezeWanted |= (uint8_t)(1u << s_freezeArmed);
         s_freezeArmed = armed;
+        s_freezeQuietAt = lv_tick_get();
     }
+    if (se->playing()) s_freezeQuietAt = lv_tick_get();
     if (armed >= 0 && armed < kTracks) s_freezeWanted &= (uint8_t)~(1u << armed);
 
     const bool bouncing = se->bounceStatus().state == crosspad::BounceState::Running;
@@ -3960,7 +3965,8 @@ void auto_freeze(crosspad::ISongEngine* se)
         }
         s_freezeRunning = -1;
     }
-    if (s_freezeWanted && s_visible && !bouncing && !se->playing()) {
+    if (s_freezeWanted && s_visible && !bouncing && !se->playing() &&
+        lv_tick_elaps(s_freezeQuietAt) >= kFreezeQuietMs) {
         for (int t = 0; t < kTracks; ++t) {
             if (!(s_freezeWanted & (1u << t))) continue;
             s_freezeWanted &= (uint8_t)~(1u << t);
