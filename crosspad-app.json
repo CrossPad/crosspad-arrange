@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.17.3",
+  "version": "0.18.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.8.0,<3.0.0",
+    "crosspad-core": ">=2.9.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.18.0: + auto-freeze -- the seq track ARM leaves is frozen once the song stops (core 2.9 freezeTrack): its engine alone into a file the song plays in its place, so only the armed track costs an engine. Its header says FRZ in ice blue, FREEZING... while it is made; arming it, or changing its notes, sound or the tempo, plays it live again. PLAY cancels a freeze, made again at the next stop. Requires core 2.9.",
     "0.17.3: a Pitch track's notes play whenever its instrument is up, whoever holds the screen -- the seq view of a Pitch block showed the notes and played nothing, with Arrange gone and the song stopped.",
     "0.17.2: the pads play an armed Slice (second kit) track again after the kit picker or the seq view -- a screen that popped past the pads' logic left Arrange believing it was still pushed. Requires core 2.8.",
     "0.17.1: a new kit or Pitch track takes the scene just added (AudioSong::sceneForNewSeq), not the sequencer's active one -- while the transport ran that was still the Drums track's, and adding a Slice track moved the Drums notes onto it. Requires core 2.8.",

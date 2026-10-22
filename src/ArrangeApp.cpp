@@ -197,6 +197,7 @@ const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
  * that looks like the others is read as one that plays. */
 const lv_color_t kMissing = lv_color_hex(0x6E757E);
 const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+const lv_color_t kIce    = lv_color_hex(0x7FD4FF);     // a frozen track's name
 const lv_color_t kRec    = lv_color_hex(0xFF5C5C);     // the playhead while a take runs: REC's red
 const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
 const lv_color_t kWell   = lv_color_hex(0x1B1E22);     // S / M off, a meter's well
@@ -1066,8 +1067,16 @@ void rebuild_timeline()
             /* A kit track without a name of its own says its kit's: with two
              * of them, which is which is the first thing to know. */
             const std::string kit = tr.name.empty() ? kit_name(track_kit(song, t)) : std::string();
-            set_text(s_headName[t], !tr.name.empty() ? tr.name.c_str() : !kit.empty() ? kit.c_str() : track_badge(tr));
-            set_ink(s_headName[t], s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
+            const char* name = !tr.name.empty() ? tr.name.c_str() : !kit.empty() ? kit.c_str() : track_badge(tr);
+            /* Frozen, it plays its file, not its engine (auto_freeze()). */
+            const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
+                                                                : crosspad::FreezeState::None;
+            const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
+            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], "FREEZING...");
+            else if (frozen) set_text_fmt(s_headName[t], "FRZ %s", name);
+            else set_text(s_headName[t], name);
+            set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
+                                   : s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);
@@ -3901,6 +3910,74 @@ bool kit2_pads_wanted()
     return song.seqRoute(seqView ? f.track : song.armedSeqTrack()) == 1;
 }
 
+/* Auto-freeze (ISongEngine::freezeTrack): the seq track ARM leaves -- another
+ * armed in its place -- is frozen once the song stops, with this screen up
+ * (the seq view and Pitch Play use the sequencer a freeze takes), so the
+ * tracks not being played cost a file's stream instead of an engine. One
+ * already frozen as it is stays; PLAY cancels a freeze and it is made again
+ * at the next stop. A song opened carries nothing over. */
+std::string s_freezeSong;
+int         s_freezeArmed = -2;
+uint8_t     s_freezeWanted = 0;     ///< a bit per track
+int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
+uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
+
+void auto_freeze(crosspad::ISongEngine* se)
+{
+    if (!se || se->openState() != crosspad::SongOpState::Ready) return;
+    int armed = -1;
+    std::string dir;
+    bool live[kTracks] = {};
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        armed = song.armed;
+        dir = song.dir;
+        for (int t = 0; t < kTracks; ++t) {
+            const auto& tr = song.tracks[t];
+            live[t] = tr.inUse && song.seqRoute(t) >= 0 && (!tr.seqBlocks || !tr.clips.empty());
+        }
+    }
+    if (dir != s_freezeSong) {
+        s_freezeSong = dir;
+        s_freezeArmed = armed;
+        s_freezeWanted = 0;
+        s_freezeRunning = -1;
+    }
+    if (armed != s_freezeArmed) {
+        if (s_freezeArmed >= 0 && s_freezeArmed < kTracks) s_freezeWanted |= (uint8_t)(1u << s_freezeArmed);
+        s_freezeArmed = armed;
+    }
+    if (armed >= 0 && armed < kTracks) s_freezeWanted &= (uint8_t)~(1u << armed);
+
+    const bool bouncing = se->bounceStatus().state == crosspad::BounceState::Running;
+    if (s_freezeRunning >= 0 && !bouncing) {
+        /* Cancelled (PLAY) or failed: wanted again, made at the next stop
+         * unless it is armed by then. */
+        if (se->freezeState((uint8_t)s_freezeRunning) != crosspad::FreezeState::Frozen &&
+            s_freezeRunning != armed) {
+            s_freezeWanted |= (uint8_t)(1u << s_freezeRunning);
+        }
+        s_freezeRunning = -1;
+    }
+    if (s_freezeWanted && s_visible && !bouncing && !se->playing()) {
+        for (int t = 0; t < kTracks; ++t) {
+            if (!(s_freezeWanted & (1u << t))) continue;
+            s_freezeWanted &= (uint8_t)~(1u << t);
+            if (!live[t] || se->freezeState((uint8_t)t) == crosspad::FreezeState::Frozen) continue;
+            if (se->freezeTrack((uint8_t)t)) s_freezeRunning = t;
+            break;
+        }
+    }
+
+    uint8_t shown = 0;
+    for (int t = 0; t < kTracks; ++t) shown |= (uint8_t)((uint8_t)se->freezeState((uint8_t)t) << (2 * t));
+    if (shown != s_freezeShown) {
+        s_freezeShown = shown;
+        if (s_visible && s_timeline) rebuild_timeline();
+    }
+}
+
 void sound_keeper_cb(lv_timer_t*)
 {
     auto& ts = crosspad::seqTrackSound();
@@ -3911,6 +3988,7 @@ void sound_keeper_cb(lv_timer_t*)
     if (s_soundBounce && (!se || se->bounceStatus().state != crosspad::BounceState::Running)) {
         s_soundBounce = false;
     }
+    auto_freeze(se);
     const bool playing = se && se->playing();
     const std::string path = crosspad::instrumentPlayState().instrumentPath;
     const bool want = host && !path.empty() && song_has_pitch_track() &&
