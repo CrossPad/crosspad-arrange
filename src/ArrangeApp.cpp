@@ -3942,6 +3942,13 @@ void sound_keeper_cb(lv_timer_t*)
         const auto& song = se->song();
         pitchArmed = song.seqRoute(song.armedSeqTrack()) == 2;
     }
+    /* The base logic on top means nothing pushed is left -- ours went with a
+     * screen that popped past it (the kit picker, the seq view) -- so a flag
+     * still set would keep the pads off the armed track for good. */
+    if (pm.getActivePadLogic() == pm.getBasePadLogic()) {
+        s_soundPads = false;
+        s_kit2Pads = false;
+    }
     const bool padsWanted = want && pitchArmed && s_visible && !crosspad_gui::mode_overlay_is_open();
     if (padsWanted && !s_soundPads) {
         pm.pushPadLogic(kSoundLogic);
@@ -4411,6 +4418,10 @@ void Arrange_destroy(lv_obj_t* root)
         crosspad::getPadManager().popPadLogic();
     }
     s_soundPads = false;
+    if (s_kit2Pads && crosspad::getPadManager().getActivePadLogic() == kKit2Logic) {
+        crosspad::getPadManager().popPadLogic();
+    }
+    s_kit2Pads = false;
     /* The song keeps playing when the screen closes -- it is the song
      * engine's, not this screen's. Only the widgets go. */
 #ifdef ARR_USE_ENCODER
