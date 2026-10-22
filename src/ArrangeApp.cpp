@@ -203,10 +203,10 @@ const lv_color_t kWell   = lv_color_hex(0x1B1E22);     // S / M off, a meter's w
 const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
- * Arrange holds four tracks, up to two of them seqs: two kit tracks, a kit
- * each, or one Pitch track (AudioSong::freeSeqRoute()). A track comes from
- * the "+ ADD TRACK" row -- AUDIO opens the Recorder to record into it, SEQ
- * asks what it plays through and opens the sequencer on it -- and any track
+ * Arrange holds four tracks, up to three of them seqs: two kit tracks, a kit
+ * each, and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
+ * the "+ ADD TRACK" row -- AUDIO opens the Recorder to record into it, KITS
+ * asks for Perf, Drums, Slice or Pitch and opens the sequencer on it -- and any track
  * can be bounced to audio at any time, which is also how a seq slot is freed
  * for the next idea. The three colours are the ones those three screens
  * already use, so a badge here names the app it opens. */
@@ -2902,6 +2902,23 @@ lv_obj_t* sheet_card(int32_t x, const char* tag, const char* name, const char* l
     return c;
 }
 
+/// A half-height card, for four choices in two rows: @p row 0 or 1.
+lv_obj_t* sheet_tile(int32_t x, int row, const char* tag, const char* name, const char* line,
+                     lv_color_t col, bool enabled, lv_event_cb_t cb, void* ud)
+{
+    lv_obj_t* c = sheet_card(x, tag, name, "", "", col, enabled, cb, ud);
+    lv_obj_set_pos(c, x, ARR_Y(74) + row * 50);
+    lv_obj_set_height(c, 46);
+    /* The card's own lines, moved up for the lower height: tag, name, line. */
+    lv_obj_set_pos(lv_obj_get_child(c, 0), 10, 6);
+    lv_obj_set_pos(lv_obj_get_child(c, 1), 10, 20);
+    lv_obj_add_flag(lv_obj_get_child(c, 2), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lv_obj_get_child(c, 3), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t* l = sheet_text(c, 0, 8, line, &lv_font_montserrat_10, kDim);
+    lv_obj_align(l, LV_ALIGN_TOP_RIGHT, -8, 7);
+    return c;
+}
+
 /// The box that carries the rules, under the cards.
 void sheet_rules(const char* line, const char* accented)
 {
@@ -2950,7 +2967,7 @@ void sheet_keys(const char* const* labels, const lv_event_cb_t* cbs, int n)
 void new_track_sheet();
 void seq_source_sheet();
 void open_seq_track(int track);
-void pick_kit_for(int track);
+void pick_kit_for(int track, crosspad::KitList list = crosspad::KitList::Any);
 
 /// Is the selected track one that holds a seq? What a bounce needs.
 bool selected_is_seq()
@@ -3029,12 +3046,20 @@ int make_seq_track(crosspad::SeqSource src, const std::string& kit)
     return made;
 }
 
+/// What KITS offers: the kit types, then Pitch Play.
+enum class NewSeq : uint8_t { Perf, Drums, Slice, Pitch };
+
 void choose_source_cb(lv_event_t* e)
 {
-    const auto src = (crosspad::SeqSource)(intptr_t)lv_event_get_user_data(e);
+    const auto what = (NewSeq)(intptr_t)lv_event_get_user_data(e);
     close_overlay();
-    /* A kit track plays the kit picked for it. */
-    if (src == crosspad::SeqSource::Kit) { pick_kit_for(-1); return; }
+    /* A kit track plays the kit picked for it, from the list of its kind. */
+    if (what != NewSeq::Pitch) {
+        pick_kit_for(-1, what == NewSeq::Drums ? crosspad::KitList::Drums
+                       : what == NewSeq::Slice ? crosspad::KitList::Slice : crosspad::KitList::Perf);
+        return;
+    }
+    const auto src = crosspad::SeqSource::Pitch;
     const int made = make_seq_track(src, {});
     if (made < 0) { note("No room: all four tracks are in use, or a seq is already in the song."); return; }
     select(made, -1);
@@ -3056,6 +3081,7 @@ void choose_source_cb(lv_event_t* e)
 
 int s_kitPickTrack = -1;   ///< the track the kit loader picks for; -1 a new one
 int s_afterPick    = -1;   ///< a track made by the pick: its seq view once this screen is back
+crosspad::KitList s_kitPickList = crosspad::KitList::Any;   ///< the list the loader opens on
 
 void kit_picked(const std::string& path, void*)
 {
@@ -3095,7 +3121,7 @@ void kit_picked(const std::string& path, void*)
     se->commit();
 }
 
-void pick_kit_for(int track)
+void pick_kit_for(int track, crosspad::KitList list)
 {
     auto* se = engine();
     if (!se) return;
@@ -3108,10 +3134,11 @@ void pick_kit_for(int track)
     if (route < 0) { note("No room for another kit track."); return; }
     if (!crosspad::getPlatformServices().kitPicker) { note("No kit loader in this firmware."); return; }
     s_kitPickTrack = track;
+    s_kitPickList = list;
     /* Not inside this screen's own click: the browser takes the screen down. */
     lv_async_call([](void*) {
         crosspad::IKitPicker* picker = crosspad::getPlatformServices().kitPicker;
-        if (!picker || !picker->open(&kit_picked, nullptr)) note("The kit loader cannot open now.");
+        if (!picker || !picker->open(&kit_picked, nullptr, s_kitPickList)) note("The kit loader cannot open now.");
     }, nullptr);
 }
 
@@ -3182,12 +3209,12 @@ void new_track_sheet()
 
     sheet_card(4, "AUDIO", "Audio", "a recorded or loaded loop,", "plays as clips",
                kAudioT, true, choose_audio_cb, nullptr);
-    sheet_card(164, "SEQ", "Seq",
-               seqFree ? "pads recorded as notes," : "both seq slots are taken:",
-               seqFree ? "editable, any sound"     : "bounce one to free it",
+    sheet_card(164, "KITS", "Kits",
+               seqFree ? "drums, slices, a kit," : "no kit slot is free:",
+               seqFree ? "or Pitch Play"         : "bounce one to free it",
                kAccent, seqFree, choose_seq_cb, nullptr);
 
-    sheet_rules("Arrange holds 4 tracks, up to 2 seq: 2 kits, or 1 Pitch.",
+    sheet_rules("4 tracks: up to 2 kits and 1 Pitch, the rest audio.",
                 "Any track can be bounced to audio at any time.");
     static const char* kLabels[] = {"CANCEL"};
     static const lv_event_cb_t kCbs[] = {cancel_sheet_cb};
@@ -3199,33 +3226,33 @@ void seq_source_sheet()
     auto* se = engine();
     if (!se || s_overlay) return;
     int used = 0, kitRoute = -1, pitchRoute = -1;
-    bool pitchThere = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
         used = song.usedTracks();
         kitRoute = song.freeSeqRoute(crosspad::SeqSource::Kit);
         pitchRoute = song.freeSeqRoute(crosspad::SeqSource::Pitch);
-        pitchThere = song.hasPitchTrack();
     }
     sheet_open();
     char title[48];
-    std::snprintf(title, sizeof(title), "Seq track %d  -  plays with", used + 1);
+    std::snprintf(title, sizeof(title), "Kit track %d  -  plays with", used + 1);
     sheet_text(s_overlay, 8, ARR_Y(36), title, &lv_font_montserrat_16, kText);
 
+    /* The kit types of the kit browser, in its colours, then Pitch Play. A
+     * kit track picks its kit from the list of its kind. */
     const bool kit = kitRoute >= 0, pitch = pitchRoute >= 0;
-    sheet_card(4, "SAMPLER", kitRoute == 1 ? "Kit 2" : "Kit",
-               kitRoute == 1 ? "a second kit, its own:" : kit ? "16 pads, one sample each:"
-                             : pitchThere ? "a Pitch track plays alone:" : "two kit tracks already:",
-               kitRoute == 1 ? "five voices each kit" : kit ? "drums, chops"
-                             : pitchThere ? "bounce it for a kit" : "bounce one to free it",
-               kKitT, kit, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Kit);
-    sheet_card(164, "PITCH PLAY", "Pitch", pitch ? "one sample in pitch:" : "plays alone in a song:",
-               pitch ? "bass, keys, melody" : "bounce the seqs first",
-               kPitchT, pitch, choose_source_cb, (void*)(intptr_t)crosspad::SeqSource::Pitch);
+    sheet_tile(4,   0, "PERF",   "Kit",   kit ? "long + short" : "no kit slot",
+               lv_color_hex(0xC6FF47), kit, choose_source_cb, (void*)(intptr_t)NewSeq::Perf);
+    sheet_tile(164, 0, "DRUMS",  "Drums", kit ? "hits, 12 voices" : "no kit slot",
+               lv_color_hex(0xFFC857), kit, choose_source_cb, (void*)(intptr_t)NewSeq::Drums);
+    sheet_tile(4,   1, "SLICE",  "Slice", kit ? "one loop, 1 voice" : "no kit slot",
+               lv_color_hex(0xFF8A3D), kit, choose_source_cb, (void*)(intptr_t)NewSeq::Slice);
+    sheet_tile(164, 1, "PITCH PLAY", "Pitch", pitch ? "melody, 4 voices" : "slot taken",
+               kPitchT, pitch, choose_source_cb, (void*)(intptr_t)NewSeq::Pitch);
 
-    sheet_rules("Kit: pick its kit, then the seq view. Pitch: Pitch Play.",
-                "Bounce turns a seq into audio and frees its slot.");
+    sheet_rules(kitRoute == 1 ? "A second kit plays beside the first, five voices each."
+                              : "A kit track: pick its kit, then the seq view.",
+                "Bounce turns a track into audio and frees its slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
     sheet_keys(kLabels, kCbs, 2);
@@ -3257,10 +3284,8 @@ void bounce_go_cb(lv_event_t*)
     }
     /* The scene looped over the whole song -- what the track plays -- into
      * one clip on this track; the engine turns it into audio when it lands. */
-    if (pitch) {
-        s_soundBounce = true;
-        crosspad::seqTrackSound().routePitch.store(true, std::memory_order_release);
-    }
+    /* Its notes reach the instrument on their own route; it stays loaded. */
+    if (pitch) s_soundBounce = true;
     if (!se->bounceSeqTrack((uint8_t)track)) {
         s_soundBounce = false;
         note("Not bounced: no song is open, or a bounce is already running.");
@@ -3901,12 +3926,18 @@ void sound_keeper_cb(lv_timer_t*)
     }
     const bool ready = want && host->state() == crosspad::IInstrumentHost::State::Ready;
     ts.pitch.setReady(ready);
-    ts.routePitch.store(want && (playing || s_soundBounce), std::memory_order_release);
 
-    /* The fingers, here: pushed only with the MODE map down -- the map keeps
-     * its own entry on the stack while it is up -- and popped only while it
-     * is ours on top. */
-    const bool padsWanted = want && s_visible && !crosspad_gui::mode_overlay_is_open();
+    /* The fingers, here, while the Pitch track is armed: pushed only with the
+     * MODE map down -- the map keeps its own entry on the stack while it is
+     * up -- and popped only while it is ours on top. With a kit track armed
+     * the pads play its kit, as they do without a Pitch track. */
+    bool pitchArmed = false;
+    if (se) {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        pitchArmed = song.seqRoute(song.armedSeqTrack()) == 2;
+    }
+    const bool padsWanted = want && pitchArmed && s_visible && !crosspad_gui::mode_overlay_is_open();
     if (padsWanted && !s_soundPads) {
         pm.pushPadLogic(kSoundLogic);
         s_soundPads = true;
@@ -3937,13 +3968,49 @@ void sound_keeper_cb(lv_timer_t*)
     }
 }
 
+/// The fingers on the Pitch track's instrument while it is armed. Only the
+/// fingers, as SecondKitPadLogic: the song's notes on the pads' route (the
+/// Drums track, EventSource::SequencerCallback) go on to the base logic --
+/// pushed over it, the instrument played the drum track's notes and the kit
+/// fell silent (hil_perf_song C, 2026-10-22).
+class PitchFingers final : public crosspad::IPadLogicHandler {
+public:
+    void onActivate(crosspad::PadManager& pm) override { pitch().onActivate(pm); }
+    void onDeactivate(crosspad::PadManager& pm) override { pitch().onDeactivate(pm); }
+    void onPadPress(crosspad::PadManager& pm, uint8_t pad, uint8_t velocity) override
+    {
+        if (pm.pressSource(pad) == crosspad::EventSource::SequencerCallback) {
+            if (auto base = beneath(pm)) base->onPadPress(pm, pad, velocity);
+            return;
+        }
+        pitch().onPadPress(pm, pad, velocity);
+    }
+    void onPadRelease(crosspad::PadManager& pm, uint8_t pad) override
+    {
+        if (pm.pressSource(pad) == crosspad::EventSource::SequencerCallback) {
+            if (auto base = beneath(pm)) base->onPadRelease(pm, pad);
+            return;
+        }
+        pitch().onPadRelease(pm, pad);
+    }
+    void onPadPressure(crosspad::PadManager& pm, uint8_t pad, uint8_t pressure) override
+    {
+        pitch().onPadPressure(pm, pad, pressure);
+    }
+
+private:
+    static crosspad::IPadLogicHandler& pitch() { return crosspad::seqTrackSound().pitch; }
+    std::shared_ptr<crosspad::IPadLogicHandler> beneath(crosspad::PadManager& pm) const
+    {
+        auto base = pm.getPadLogic(pm.getBasePadLogic());
+        return base.get() == this ? nullptr : base;
+    }
+};
+
 void sound_keeper_start()
 {
     if (s_soundTimer) return;
-    /* Non-owning: the logic is SeqTrackSound's, which outlives every screen. */
-    crosspad::getPadManager().registerPadLogic(
-        kSoundLogic, std::shared_ptr<crosspad::IPadLogicHandler>(&crosspad::seqTrackSound().pitch,
-                                                                 [](crosspad::IPadLogicHandler*) {}));
+    crosspad::getPadManager().registerPadLogic(kSoundLogic, std::make_shared<PitchFingers>());
     crosspad::getPadManager().registerPadLogic(
         kKit2Logic, std::shared_ptr<crosspad::IPadLogicHandler>(&crosspad::seqTrackSound().kit2,
                                                                 [](crosspad::IPadLogicHandler*) {}));
