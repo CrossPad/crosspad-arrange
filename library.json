@@ -1,11 +1,11 @@
 {
     "name": "crosspad-arrange",
-    "version": "0.20.0",
+    "version": "0.20.1",
     "license": "GPL-3.0-or-later",
     "description": "Four audio tracks of bounced clips on a timeline",
     "keywords": ["crosspad", "arrange", "lvgl", "pad"],
     "dependencies": {
-        "crosspad-core": ">=2.13.0,<3.0.0",
+        "crosspad-core": ">=2.14.0,<3.0.0",
         "crosspad-gui": ">=2.0.0,<3.0.0"
     },
     "build": {
