@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.12.0,<3.0.0",
+    "crosspad-core": ">=2.13.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.20.0: a freeze shows in the processing box over the lanes, as a time stretch does -- FREEZING TRACK 2, render 1 of 3, 40 % -- and core 2.13 renders it off the clock where the board can. Requires core 2.13.",
     "0.19.1: fits under the 40 px top bar (crosspad-gui 2.4): the key row sat 5 px under it -- the screen is laid out from the export's 30 px bar -- and the screen is 200 px tall, not 210. The key row is 2 px under the bar, the lanes 28 px, the tool row 2 px higher.",
     "0.19.0: auto-freeze starts the moment ARM moves on -- a new track added -- with the song stopped, not 3 s later; the header shows the whole freeze, FREEZING 2/5 40%. Core 2.12 renders only the blocks that changed or are new: a block the same as another, or as at the last freeze, is found on the card. Requires core 2.12.",
     "0.18.2: a track being frozen says how far on its header -- FREEZING 45% -- from the freeze's render (core 2.11 renders a looping block's two passes, so it is seconds, not the track's length). Requires core 2.11.",

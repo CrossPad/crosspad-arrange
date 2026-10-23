@@ -116,6 +116,10 @@ extern "C" {
 #define ARR_USE_ENCODER 1
 #endif
 
+/// The processing box's text for a freeze Arrange runs (defined with the
+/// auto-freeze, past the anonymous namespace).
+bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
+
 namespace {
 
 /* ── set_text_fmt() is not used here, and this is why ─────────────
@@ -1077,7 +1081,7 @@ void rebuild_timeline()
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
-            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], "FREEZING 0%");
+            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], "FREEZING...");
             else if (frozen) set_text_fmt(s_headName[t], "FRZ %s", name);
             else set_text(s_headName[t], name);
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
@@ -1188,13 +1192,32 @@ void show_meters(crosspad::ISongEngine* se)
     }
 }
 
-/// Stretched or repitched blocks still being fitted to the tempo: a box over
-/// the lanes for as long as any is waiting -- they are made only while
-/// stopped, and until then those blocks play as recorded.
+bool s_procFreeze = false;   ///< the box says a freeze, not a time stretch
+
+/// A track freezing, or stretched or repitched blocks still being fitted to
+/// the tempo: a box over the lanes for as long as either runs -- both are
+/// made only while stopped, and until then those blocks play as they were.
 void show_processing(crosspad::ISongEngine* se)
 {
     if (!s_procBox) return;
     const bool up = !lv_obj_has_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+    char fbuf[72];
+    if (freeze_progress(se, fbuf, sizeof(fbuf))) {
+        s_procFreeze = true;
+        set_text(s_procLabel, fbuf);
+        if (!up) {
+            lv_obj_remove_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_procBox);
+        }
+        return;
+    }
+    if (s_procFreeze) {
+        s_procFreeze = false;
+        if (up && !se->stretchWaiting()) {
+            lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+    }
     const uint32_t waiting = se->stretchWaiting();
     if (!waiting) {
         if (up) {
@@ -3983,22 +4006,23 @@ void auto_freeze(crosspad::ISongEngine* se)
         s_freezeShown = shown;
         if (s_visible && s_timeline) rebuild_timeline();
     }
-    /* How far the freeze is, on the header of the track it is making: the
-     * renders through of those its plan needs (core finds the ones it has on
-     * the card and renders only the rest), and how far the one under way is. */
-    if (s_visible && s_freezeRunning >= 0 && s_headName[s_freezeRunning] &&
-        se->freezeState((uint8_t)s_freezeRunning) == crosspad::FreezeState::Freezing) {
-        const crosspad::BounceStatus st = se->bounceStatus();
-        const uint32_t pieces = st.pieces ? st.pieces : 1;
-        const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
-        const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
-        char buf[32];
-        if (st.pieces > 1) std::snprintf(buf, sizeof(buf), "FREEZING %u/%u %u%%",
-                                         (unsigned)std::min<uint32_t>(st.piecesDone + 1, st.pieces),
-                                         (unsigned)st.pieces, pct);
-        else std::snprintf(buf, sizeof(buf), "FREEZING %u%%", pct);
-        set_text(s_headName[s_freezeRunning], buf);
-    }
+}
+
+/// The processing box's text for a freeze Arrange started, while it runs:
+/// the track, the renders through of those its plan needs (core finds the
+/// ones it has on the card and renders only the rest) and how far the whole
+/// is. False when no freeze of ours runs.
+bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap)
+{
+    if (!se || s_freezeRunning < 0 ||
+        se->freezeState((uint8_t)s_freezeRunning) != crosspad::FreezeState::Freezing) return false;
+    const crosspad::BounceStatus st = se->bounceStatus();
+    const uint32_t pieces = st.pieces ? st.pieces : 1;
+    const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
+    const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
+    std::snprintf(buf, cap, "FREEZING TRACK %d\nrender %u of %u  -  %u%%", s_freezeRunning + 1,
+                  (unsigned)std::min<uint32_t>(st.piecesDone + 1, pieces), (unsigned)pieces, pct);
+    return true;
 }
 
 void sound_keeper_cb(lv_timer_t*)
