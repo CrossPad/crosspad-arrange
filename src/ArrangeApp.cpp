@@ -148,9 +148,14 @@ static void set_text_fmt(lv_obj_t* label, const char* fmt, ...)
 constexpr int      kTracks   = crosspad::AudioSong::kTracks;
 /* A screen y as a y inside the root: the root fills the app container, which
  * begins under the transport bar. The whole screen is laid out in the
- * export's screen coordinates, and this is the only place that shift
- * happens. */
-#define ARR_Y(v) ((v) - TRANSPORT_BAR_HEIGHT)
+ * export's screen coordinates -- drawn under a 30 px bar -- and this is the
+ * only place that shift happens. Under the 40 px bar (crosspad-gui 2.4) the
+ * root is 200 px, not 210: the export's 35 (the key row) lands 2 px under
+ * the bar, the lanes give 2 px each (kLaneH) and the key row moves up 2
+ * (ARR_Y(204)); subtracting the bar's own height put the key row 5 px under
+ * it. */
+constexpr int32_t  kExportTop = 33;
+#define ARR_Y(v) ((v) - kExportTop)
 /* Zoom: pixels per bar -- a whole song on one screen, phrases, single beats
  * (UX 2000 section 7.3: three levels). */
 constexpr int32_t  kZoomPx[] = {3, 12, 48};
@@ -166,7 +171,7 @@ constexpr int32_t  kRulerH   = 10;
 /* 26, not 30: the status line came back into this screen's own layout when
  * the transport bar took the status bar's row, and the four lanes paid the
  * 16 px for it rather than the tools, which have to stay a finger tall. */
-constexpr int32_t  kLaneH    = 30;     // the export's 31, less the ruler's pixel
+constexpr int32_t  kLaneH    = 28;     // the export's 31, less the ruler's pixel and the taller bar's two
 /* 2, not 4: at 4 the fourth lane ended on 208 and the tool row begins on
  * 206 -- measured on the board, two pixels of overlap. The ruler the export
  * does not have already pushes this block 14 px down; it must not also push
@@ -2952,7 +2957,7 @@ void sheet_keys(const char* const* labels, const lv_event_cb_t* cbs, int n)
         const int32_t w = (i == n - 1) ? (316 - x) : avail / n;
         lv_obj_t* b = lv_button_create(s_overlay);
         lv_obj_remove_style_all(b);
-        lv_obj_set_pos(b, x, ARR_Y(206));
+        lv_obj_set_pos(b, x, ARR_Y(204));
         lv_obj_set_size(b, w, 28);
         lv_obj_set_style_radius(b, 4, 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
@@ -4241,7 +4246,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
         lv_obj_set_width(name, kHeadW - 10);
         lv_label_set_text(name, "");
-        lv_obj_set_pos(name, 5, 13);
+        lv_obj_set_pos(name, 5, 11);            // 17 px of line in a 28 px lane
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -4390,7 +4395,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     constexpr int32_t kToolW = 74, kToolPitch = 78, kToolH = 28;
     s_tools[0] = lv_CreateEditableButton(s_root);
     lv_obj_set_size(s_tools[0], kToolW, kToolH);
-    place(s_tools[0], 6, ARR_Y(206));
+    place(s_tools[0], 6, ARR_Y(204));
     lv_obj_set_style_pad_all(s_tools[0], 0, 0);
     lv_obj_set_style_radius(s_tools[0], 4, 0);
     lv_obj_set_style_shadow_width(s_tools[0], 0, 0);
@@ -4416,7 +4421,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     for (int i = 0; i < 3; ++i) {
         s_tools[i + 1] = tool_button(s_root, kToolW, kTools[i].text, kTools[i].cb);
         lv_obj_set_height(s_tools[i + 1], kToolH);
-        place(s_tools[i + 1], 6 + (i + 1) * kToolPitch, ARR_Y(206));
+        place(s_tools[i + 1], 6 + (i + 1) * kToolPitch, ARR_Y(204));
     }
     /* Two words: the size MOVE is set in. */
     lv_obj_set_style_text_font(lv_obj_get_child(s_tools[3], 0), &lv_font_montserrat_10, 0);
