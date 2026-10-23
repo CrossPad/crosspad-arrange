@@ -3911,18 +3911,17 @@ bool kit2_pads_wanted()
 }
 
 /* Auto-freeze (ISongEngine::freezeTrack): the seq track ARM leaves -- another
- * armed in its place -- is frozen once the song has been stopped, and ARM
- * left alone, for kFreezeQuietMs, with this screen up
+ * armed in its place, a new track added -- is frozen at once while the song
+ * is stopped (else when it stops), with this screen up
  * (the seq view and Pitch Play use the sequencer a freeze takes), so the
  * tracks not being played cost a file's stream instead of an engine. One
- * already frozen as it is stays; PLAY, REC and DUB cancel a freeze and it is
- * made again at the next stop. A song opened carries nothing over. */
+ * already frozen as it is stays; PLAY, REC and DUB cancel a freeze, and the
+ * next stop finishes it from the renders already on the card. A song opened
+ * carries nothing over. */
 std::string s_freezeSong;
 int         s_freezeArmed = -2;
 uint8_t     s_freezeWanted = 0;     ///< a bit per track
 int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
-uint32_t    s_freezeQuietAt = 0;    ///< lv_tick of the last ARM move or playback: a freeze waits kFreezeQuietMs
-constexpr uint32_t kFreezeQuietMs = 3000;   // a track added and recorded at once is not frozen first
 uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
 
 void auto_freeze(crosspad::ISongEngine* se)
@@ -3950,9 +3949,7 @@ void auto_freeze(crosspad::ISongEngine* se)
     if (armed != s_freezeArmed) {
         if (s_freezeArmed >= 0 && s_freezeArmed < kTracks) s_freezeWanted |= (uint8_t)(1u << s_freezeArmed);
         s_freezeArmed = armed;
-        s_freezeQuietAt = lv_tick_get();
     }
-    if (se->playing()) s_freezeQuietAt = lv_tick_get();
     if (armed >= 0 && armed < kTracks) s_freezeWanted &= (uint8_t)~(1u << armed);
 
     const bool bouncing = se->bounceStatus().state == crosspad::BounceState::Running;
@@ -3965,8 +3962,7 @@ void auto_freeze(crosspad::ISongEngine* se)
         }
         s_freezeRunning = -1;
     }
-    if (s_freezeWanted && s_visible && !bouncing && !se->playing() &&
-        lv_tick_elaps(s_freezeQuietAt) >= kFreezeQuietMs) {
+    if (s_freezeWanted && s_visible && !bouncing && !se->playing()) {
         for (int t = 0; t < kTracks; ++t) {
             if (!(s_freezeWanted & (1u << t))) continue;
             s_freezeWanted &= (uint8_t)~(1u << t);
@@ -3982,14 +3978,20 @@ void auto_freeze(crosspad::ISongEngine* se)
         s_freezeShown = shown;
         if (s_visible && s_timeline) rebuild_timeline();
     }
-    /* How far the freeze is, on the header of the track it is making: what
-     * the render has written of the piece it is on. */
+    /* How far the freeze is, on the header of the track it is making: the
+     * renders through of those its plan needs (core finds the ones it has on
+     * the card and renders only the rest), and how far the one under way is. */
     if (s_visible && s_freezeRunning >= 0 && s_headName[s_freezeRunning] &&
         se->freezeState((uint8_t)s_freezeRunning) == crosspad::FreezeState::Freezing) {
         const crosspad::BounceStatus st = se->bounceStatus();
-        const unsigned pct = st.framesTotal ? (unsigned)((uint64_t)st.framesDone * 100 / st.framesTotal) : 0;
-        char buf[24];
-        std::snprintf(buf, sizeof(buf), "FREEZING %u%%", pct);
+        const uint32_t pieces = st.pieces ? st.pieces : 1;
+        const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
+        const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
+        char buf[32];
+        if (st.pieces > 1) std::snprintf(buf, sizeof(buf), "FREEZING %u/%u %u%%",
+                                         (unsigned)std::min<uint32_t>(st.piecesDone + 1, st.pieces),
+                                         (unsigned)st.pieces, pct);
+        else std::snprintf(buf, sizeof(buf), "FREEZING %u%%", pct);
         set_text(s_headName[s_freezeRunning], buf);
     }
 }

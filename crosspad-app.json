@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.18.2",
+  "version": "0.19.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.11.0,<3.0.0",
+    "crosspad-core": ">=2.12.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.19.0: auto-freeze starts the moment ARM moves on -- a new track added -- with the song stopped, not 3 s later; the header shows the whole freeze, FREEZING 2/5 40%. Core 2.12 renders only the blocks that changed or are new: a block the same as another, or as at the last freeze, is found on the card. Requires core 2.12.",
     "0.18.2: a track being frozen says how far on its header -- FREEZING 45% -- from the freeze's render (core 2.11 renders a looping block's two passes, so it is seconds, not the track's length). Requires core 2.11.",
     "0.18.1: auto-freeze waits for 3 s with the song stopped and ARM left alone, so a track added and recorded at once is not frozen first; REC and DUB cancel a freeze as PLAY does (core 2.10.1). Requires core 2.10.1.",
     "0.18.0: + auto-freeze -- the seq track ARM leaves is frozen once the song stops (core 2.9 freezeTrack): its engine alone into a file the song plays in its place, so only the armed track costs an engine. Its header says FRZ in ice blue, FREEZING... while it is made; arming it, or changing its notes, sound or the tempo, plays it live again. PLAY cancels a freeze, made again at the next stop. Requires core 2.9.",
