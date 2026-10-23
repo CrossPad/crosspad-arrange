@@ -1072,7 +1072,7 @@ void rebuild_timeline()
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
-            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], "FREEZING...");
+            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], "FREEZING 0%");
             else if (frozen) set_text_fmt(s_headName[t], "FRZ %s", name);
             else set_text(s_headName[t], name);
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
@@ -3981,6 +3981,16 @@ void auto_freeze(crosspad::ISongEngine* se)
     if (shown != s_freezeShown) {
         s_freezeShown = shown;
         if (s_visible && s_timeline) rebuild_timeline();
+    }
+    /* How far the freeze is, on the header of the track it is making: what
+     * the render has written of the piece it is on. */
+    if (s_visible && s_freezeRunning >= 0 && s_headName[s_freezeRunning] &&
+        se->freezeState((uint8_t)s_freezeRunning) == crosspad::FreezeState::Freezing) {
+        const crosspad::BounceStatus st = se->bounceStatus();
+        const unsigned pct = st.framesTotal ? (unsigned)((uint64_t)st.framesDone * 100 / st.framesTotal) : 0;
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "FREEZING %u%%", pct);
+        set_text(s_headName[s_freezeRunning], buf);
     }
 }
 
