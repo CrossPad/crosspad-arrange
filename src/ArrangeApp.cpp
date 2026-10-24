@@ -1313,7 +1313,12 @@ void tick_cb(lv_timer_t*)
         if (landed.ok) {
             select(landed.track, -1);
             rebuild_timeline();
-            note_fmt("Take on track %d from bar %u.", landed.track + 1, (unsigned)landed.bar + 1);
+            if (landed.passes > 1) {
+                note_fmt("%u passes on track %d: the last from bar %u, the others are clips (EDIT).",
+                         (unsigned)landed.passes, landed.track + 1, (unsigned)landed.bar + 1);
+            } else {
+                note_fmt("Take on track %d from bar %u.", landed.track + 1, (unsigned)landed.bar + 1);
+            }
         } else {
             note_fmt("No take: %s.", landed.error.c_str());
         }
