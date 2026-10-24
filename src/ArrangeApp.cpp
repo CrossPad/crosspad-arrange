@@ -4,20 +4,23 @@
  *
  * The main place of work on the CrossPad (UX 2000 section 6). A song holds
  * four tracks, up to two of them seqs: two kit tracks, each playing a kit of
- * its own, or one Pitch track. A track is made here and filled by the app
- * that makes that kind of sound -- AUDIO opens the Recorder, KITS asks whether
- * it plays through a kit (picked in the kit loader) or Pitch Play and leaves
- * it empty and armed, on a scene of its own: REC records the pads into it,
- * CLIP EDIT opens its seq view (a Pitch track with no instrument picked yet
- * opens Pitch Play, where one is) -- and any track can be bounced to
+ * its own, or one Pitch track. A track is made here and filled here: AUDIO
+ * leaves an empty audio track armed, so REC records its input into it over
+ * the song (ArrangeAudioTake; the input -- the mics, the line-in, both, USB
+ * or the pads -- is a long press on its header), KITS asks whether it plays
+ * through a kit (picked in the kit loader) or Pitch Play and leaves it empty
+ * and armed, on a scene of its own: REC records the pads into it, CLIP EDIT
+ * opens its seq view (a Pitch track with no instrument picked yet opens
+ * Pitch Play, where one is) -- and any track can be bounced to
  * audio at any time, which is also how a seq slot is freed for the next idea.
  *
  * Audio tracks are laid out like a linear DAW: lanes, a bar ruler, every clip
  * a block as long as it plays, in a colour of its own, and a playhead while
  * the song runs -- and stopped, where PLAY starts, which the top bar's
  * position moves a bar a detent. REC and DUB on the top bar record the pads
- * onto the armed seq track from there -- ARM, the dot on a seq track's
- * header, which is also whose kit the pads play here (ISongEngine::recordSeq,
+ * onto the armed seq track from there -- ARM, the dot on a track's header,
+ * which on a seq track is also whose kit the pads play here; on an audio
+ * track REC records its input instead, and there is no DUB (ISongEngine::recordSeq,
  * AudioSong::armed; SecondKitPadLogic for the second kit): a REC becomes a
  * block of its own notes as many bars long as it ran -- a STOP puts the
  * playhead back on bar one, the next PLAY's downbeat -- and a DUB adds
@@ -33,9 +36,11 @@
  *          tempo), LOOP, ZOOM. No back button and no PLAY: back is the power
  *          button's click, the transport is the bar above
  *   lanes  a header per track -- its number and what it holds, AUD / the
- *          kit's name / PITCH, in the colour of the app that makes it, ARM
- *          on a seq track (tap: pick the track and open its menu -- BOUNCE a
- *          seq to audio, its KIT, DELETE; hold: MIX) -- the timeline beside
+ *          kit's name / PITCH (an audio track without a name says its
+ *          input, AUD MIC), in the colour of the app that makes it, ARM (tap:
+ *          pick the track and open its menu -- ARM, an audio track's INPUT,
+ *          BOUNCE a seq to audio, its KIT, DELETE; hold: an audio track's
+ *          input and MIX, MIX on the others) -- the timeline beside
  *          them, and under the last of them
  *          "+ ADD TRACK" while there is room
  *   keys   MOVE, DUP and DEL act on the selected block; EDIT is the song's
@@ -89,6 +94,8 @@
 #include "crosspad/kit/IKitPicker.hpp"
 #include "crosspad/sampler/ISecondKit.hpp"
 #include "crosspad/pad/PadManager.hpp"
+#include "crosspad/sampletools/ISampleTools.hpp"
+#include "crosspad/song/ArrangeAudioTake.hpp"
 #include "crosspad/song/ArrangeFocus.hpp"
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad/song/SeqTrackSound.hpp"
@@ -217,11 +224,11 @@ const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
  * Arrange holds four tracks, up to three of them seqs: two kit tracks, a kit
  * each, and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
- * the "+ ADD TRACK" row -- AUDIO opens the Recorder to record into it, KITS
- * asks for Perf, Drums, Slice or Pitch and opens the sequencer on it -- and any track
+ * the "+ ADD TRACK" row -- AUDIO is recorded into here, KITS asks for Perf,
+ * Drums, Slice or Pitch, also recorded into here -- and any track
  * can be bounced to audio at any time, which is also how a seq slot is freed
  * for the next idea. The three colours are the ones those three screens
- * already use, so a badge here names the app it opens. */
+ * already use, so a badge here names the app that edits it. */
 const lv_color_t kAudioT = lv_color_hex(0x4EA6D3);    // AUD   -- the Recorder's blue
 const lv_color_t kKitT   = lv_color_hex(0xFFC857);    // KIT   -- the Sampler's amber
 const lv_color_t kPitchT = lv_color_hex(0xA77BF0);    // PITCH -- Pitch Play's purple
@@ -236,6 +243,30 @@ const char* track_badge(const crosspad::SongTrack& t)
 {
     if (t.kind != crosspad::TrackKind::Seq) return "AUD";
     return t.source == crosspad::SeqSource::Pitch ? "PITCH" : "KIT";
+}
+
+/// The inputs an audio track can record, in the order its input sheet lists
+/// them, and what the header and the sheet call each.
+struct TrackInput { crosspad::RecInput in; const char* name; };
+constexpr TrackInput kTrackInputs[] = {
+    {crosspad::RecInput::Mic, "MIC"},          {crosspad::RecInput::Line, "LINE"},
+    {crosspad::RecInput::MicLine, "MIC+LINE"}, {crosspad::RecInput::Usb, "USB"},
+    {crosspad::RecInput::Pads, "PADS"},
+};
+
+const char* input_name(crosspad::RecInput in)
+{
+    for (const auto& i : kTrackInputs)
+        if (i.in == in) return i.name;
+    return "MIC";
+}
+
+/// The track REC takes onto: an armed audio track, or else the seq track the
+/// seq takes would go to.
+bool track_armed(const crosspad::AudioSong& song, int t)
+{
+    const int audio = song.armedAudioTrack();
+    return audio >= 0 ? audio == t : song.armedSeqTrack() == t;
 }
 
 /// The kit list's name for @p kitPath, or "" when the card has no such kit.
@@ -298,7 +329,7 @@ lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headMute[kTracks] = {};
 lv_obj_t* s_headSolo[kTracks] = {};
-lv_obj_t* s_headArm[kTracks] = {};   ///< ARM, a seq track's: REC takes onto it, the pads play its kit
+lv_obj_t* s_headArm[kTracks] = {};   ///< ARM: REC takes onto the track (its pads, or its input)
 /// A track's stereo meter beside the lanes: its well, ten segments a side.
 lv_obj_t* s_meterWell[kTracks] = {};
 lv_obj_t* s_meterSeg[kTracks][2][kMeterSegs] = {};
@@ -1078,7 +1109,12 @@ void rebuild_timeline()
             /* A kit track without a name of its own says its kit's: with two
              * of them, which is which is the first thing to know. */
             const std::string kit = tr.name.empty() ? kit_name(track_kit(song, t)) : std::string();
-            const char* name = !tr.name.empty() ? tr.name.c_str() : !kit.empty() ? kit.c_str() : track_badge(tr);
+            char audioName[24];
+            std::snprintf(audioName, sizeof(audioName), "AUD %s", input_name(tr.input));
+            const char* name = !tr.name.empty()                       ? tr.name.c_str()
+                             : !kit.empty()                           ? kit.c_str()
+                             : tr.kind == crosspad::TrackKind::Audio ? audioName
+                                                                      : track_badge(tr);
             /* Frozen, it plays its file, not its engine (auto_freeze()). */
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
@@ -1093,9 +1129,10 @@ void rebuild_timeline()
         style_toggle(s_headMute[t], tr.muted, kMute);
         if (s_headArm[t]) {
             const bool seq = song.seqRoute(t) >= 0;
-            if (seq) lv_obj_remove_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
-            else     lv_obj_add_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
-            set_bg(s_headArm[t], seq && song.armedSeqTrack() == t ? kRec : kWell);
+            const bool audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
+            if (seq || audio) lv_obj_remove_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
+            else              lv_obj_add_flag(s_headArm[t], LV_OBJ_FLAG_HIDDEN);
+            set_bg(s_headArm[t], track_armed(song, t) ? kRec : kWell);
         }
     }
 
@@ -1270,6 +1307,17 @@ void tick_cb(lv_timer_t*)
         }
     }
     show_processing(se);
+    /* An audio take that has ended goes onto its track (ArrangeAudioTake). */
+    const crosspad::ArrangeAudioTake::Result landed = crosspad::arrangeAudioTake().poll();
+    if (landed.done) {
+        if (landed.ok) {
+            select(landed.track, -1);
+            rebuild_timeline();
+            note_fmt("Take on track %d from bar %u.", landed.track + 1, (unsigned)landed.bar + 1);
+        } else {
+            note_fmt("No take: %s.", landed.error.c_str());
+        }
+    }
     if (s_merging) {
         char buf[48];
         if (se->editState() == crosspad::SongOpState::Busy) {
@@ -1362,8 +1410,9 @@ void tick_cb(lv_timer_t*)
         if (!s_playhead) return;
     }
     const int32_t x = (int32_t)(pos * s_pxPerBar);
-    /* Red while the pads are being recorded onto the song. */
-    set_bg(s_playhead, se->seqTake() != crosspad::SyncTake::None ? kRec : kHead);
+    /* Red while the pads or an input are being recorded onto the song. */
+    set_bg(s_playhead, se->seqTake() != crosspad::SyncTake::None || crosspad::arrangeAudioTake().recording()
+                           ? kRec : kHead);
     if (lv_obj_has_flag(s_playhead, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_playhead, LV_OBJ_FLAG_HIDDEN);
     if (lv_obj_get_x(s_playhead) != x) lv_obj_set_pos(s_playhead, x, 0);
     std::snprintf(buf, sizeof(buf), "bar %d/%u", (int)pos + 1, (unsigned)total);
@@ -1729,6 +1778,25 @@ bool back_handler(lv_obj_t*)
 }
 
 void track_menu();
+void input_sheet(int track);
+void mix_cb(lv_event_t*);
+
+/// A long press on a track's header: an audio track's input (with MIX beside
+/// it in the same sheet), MIX straight away on any other.
+void head_hold_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se) return;
+    const int t = (int)(intptr_t)lv_event_get_user_data(e);
+    bool audio = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& tr = se->song().tracks[t];
+        audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
+    }
+    if (audio) input_sheet(t);
+    else       mix_cb(e);
+}
 
 /// A track header picks the track and opens its menu -- BOUNCE and DELETE,
 /// what acts on a track rather than on a block. EDIT acts on the one picked,
@@ -2872,8 +2940,10 @@ void edit_cb(lv_event_t*)
  *                      |            |
  *                      |            +--> "plays with": KIT or PITCH
  *                      |                      |
- *                      +--> the Recorder       +--> an empty track, armed:
- *                                                   REC records into it
+ *                      +----------------------+--> an empty track, armed:
+ *                                                   REC records into it --
+ *                                                   its input over the song,
+ *                                                   the pads on a seq track
  *                    (KIT: the kit loader first; PITCH with no instrument
  *                     yet: Pitch Play, to pick one)
  *
@@ -3033,19 +3103,19 @@ void choose_audio_cb(lv_event_t*)
     }
     close_overlay();
     if (made < 0) { note("No room: all four tracks are in use."); return; }
+    /* An empty audio track is filled by recording into it, here: armed, the
+     * next REC records its input over the song (ArrangeAudioTake). */
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        se->song().armed = (int8_t)made;
+    }
     se->commit();
     select(made, -1);
     rebuild_timeline();
-    /* An empty audio track is filled by recording into it. The Recorder is
-     * told which track sent it, so it knows where its take belongs and can
-     * offer the way back. */
-    crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
-    f.clear();
-    f.track = made;
-    f.bar = playhead_bar();      // the take, with the song, starts there
-    if (!crosspad_gui::mode_overlay_open_app("Recorder")) {
-        f.clear();
-        note_fmt("Track %d added. No Recorder in this firmware -- EDIT it to add a clip.", made + 1);
+    if (crosspad::getPlatformServices().sampleTools) {
+        note_fmt("Track %d armed: REC records the mics into it. Hold its header for another input.", made + 1);
+    } else {
+        note_fmt("Track %d added. No recorder in this firmware -- EDIT it to add a clip.", made + 1);
     }
 }
 
@@ -3568,6 +3638,63 @@ void stretch_sheet()
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
 }
 
+/// An input picked for an audio track: recorded into it by the next REC, so
+/// the track is armed with it.
+void input_pick_cb(lv_event_t* e)
+{
+    const auto in = (crosspad::RecInput)(intptr_t)lv_event_get_user_data(e);
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        auto& t = song.tracks[s_selTrack];
+        if (!t.inUse || t.kind != crosspad::TrackKind::Audio) return;
+        t.input = in;
+        song.armed = (int8_t)s_selTrack;
+    }
+    se->commit();
+    rebuild_timeline();
+    crosspad::ISampleTools* st = crosspad::getPlatformServices().sampleTools;
+    if (st && !st->inputAvailable(in)) {
+        note_fmt("Track %d armed on %s -- it records what the computer plays once Settings > USB is audio.",
+                 s_selTrack + 1, input_name(in));
+    } else {
+        note_fmt("Track %d armed: REC records %s into it.", s_selTrack + 1, input_name(in));
+    }
+}
+
+/// A long press on an audio track's header: which input REC records into it
+/// -- the mics, the line-in, both at once, what the computer plays over USB,
+/// or what the pads play -- and MIX, which the same press opens on the others.
+void input_sheet(int track)
+{
+    auto* se = engine();
+    if (!se || s_overlay || s_merging || s_bouncing >= 0 || track < 0 || track >= kTracks) return;
+    crosspad::RecInput cur = crosspad::RecInput::Mic;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& t = se->song().tracks[track];
+        if (!t.inUse || t.kind != crosspad::TrackKind::Audio) return;
+        cur = t.input;
+    }
+    select(track, s_selTrack == track ? s_selIndex : -1);
+    crosspad::ISampleTools* st = crosspad::getPlatformServices().sampleTools;
+    char title[40];
+    std::snprintf(title, sizeof(title), "Track %d  -  records from", track + 1);
+    overlay_list(title);
+    for (const auto& i : kTrackInputs) {
+        char text[64];
+        const bool now = !st || st->inputAvailable(i.in);
+        std::snprintf(text, sizeof(text), "%s %s%s", i.in == cur ? LV_SYMBOL_OK : "    ", i.name,
+                      now ? "" : "  -  USB audio is off");
+        overlay_item(text, input_pick_cb, (void*)(intptr_t)i.in);
+    }
+    overlay_item(LV_SYMBOL_SETTINGS " MIX ...", [](lv_event_t* e) { close_overlay(); mix_cb(e); }, nullptr);
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
 void track_menu()
@@ -3575,6 +3702,7 @@ void track_menu()
     auto* se = engine();
     if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
     bool seq = false, muted = false, solo = false, armed = false;
+    crosspad::RecInput input = crosspad::RecInput::Mic;
     crosspad::StretchMode stretch = crosspad::StretchMode::Off;
     char title[32];
     std::string kit;
@@ -3588,7 +3716,8 @@ void track_menu()
         stretch = t.stretch;
         muted = t.muted;
         solo = t.solo;
-        armed = seq && song.armedSeqTrack() == s_selTrack;
+        armed = track_armed(song, s_selTrack);
+        input = t.input;
         kitTrack = seq && t.source == crosspad::SeqSource::Kit;
         if (kitTrack) kit = kit_name(track_kit(song, s_selTrack));
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
@@ -3599,9 +3728,12 @@ void track_menu()
         std::snprintf(item, sizeof(item), LV_SYMBOL_DRIVE " %s", kit.empty() ? "Kit ..." : kit.c_str());
         overlay_key(item, [](lv_event_t*) { close_overlay(); pick_kit_for(s_selTrack); });
     }
-    if (seq) {
-        overlay_key(armed ? LV_SYMBOL_OK " Armed" : LV_SYMBOL_PLUS " Arm for REC",
-                    [](lv_event_t*) { close_overlay(); arm_track(s_selTrack); });
+    overlay_key(armed ? LV_SYMBOL_OK " Armed" : LV_SYMBOL_PLUS " Arm for REC",
+                [](lv_event_t*) { close_overlay(); arm_track(s_selTrack); });
+    if (!seq) {
+        char item[32];
+        std::snprintf(item, sizeof(item), LV_SYMBOL_AUDIO " Input: %s", input_name(input));
+        overlay_key(item, [](lv_event_t*) { close_overlay(); input_sheet(s_selTrack); });
     }
     if (seq) overlay_key(LV_SYMBOL_AUDIO " Bounce ...", [](lv_event_t*) { close_overlay(); bounce_sheet(); });
     else overlay_key(stretch == crosspad::StretchMode::KeepPitch ? LV_SYMBOL_SHUFFLE " Stretch"
@@ -3802,7 +3934,8 @@ void toggle_solo(int t)
     se->commit();
 }
 
-/// ARM: REC and DUB take onto @p t, and the pads play its kit here.
+/// ARM: REC takes onto @p t -- a seq track's pads, whose kit they then play
+/// here, or an audio track's input.
 void arm_track(int t)
 {
     auto* se = engine();
@@ -3810,7 +3943,9 @@ void arm_track(int t)
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();
-        if (song.seqRoute(t) < 0 || song.armed == t) return;
+        const auto& tr = song.tracks[t];
+        const bool audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
+        if ((song.seqRoute(t) < 0 && !audio) || song.armed == t) return;
         song.armed = (int8_t)t;
     }
     se->commit();
@@ -4274,7 +4409,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         /* The tracks' levels, from the tracks. The export's tool row has five
          * keys and MIX is not one of them, so it moved to the one gesture
          * these buttons were not using -- and the association is exact. */
-        lv_obj_add_event_cb(h, mix_cb, LV_EVENT_LONG_PRESSED, nullptr);
+        lv_obj_add_event_cb(h, head_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)t);
         /* One line over the name: "01" in the type's colour, S and M beside
          * it, then ARM on a seq track. They only show: a touch anywhere on the
          * header opens its menu, where all three are keys -- small buttons
@@ -4311,8 +4446,9 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         };
         s_headSolo[t] = toggle(20, "S");
         s_headMute[t] = toggle(38, "M");
-        /* ARM, a seq track's only: a dot after M, red while REC takes onto
-         * the track and the pads play its kit. */
+        /* ARM: a dot after M, red while REC takes onto the track -- the pads
+         * onto a seq track, whose kit they then play, or an audio track's
+         * input. */
         lv_obj_t* arm = lv_obj_create(h);
         lv_obj_remove_style_all(arm);
         lv_group_remove_obj(arm);
