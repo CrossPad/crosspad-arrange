@@ -5,9 +5,11 @@
  * The main place of work on the CrossPad (UX 2000 section 6). A song holds
  * four tracks, up to two of them seqs: two kit tracks, each playing a kit of
  * its own, or one Pitch track. A track is made here and filled by the app
- * that makes that kind of sound -- AUDIO opens the Recorder, SEQ asks whether
- * it plays through a kit (picked in the kit loader) or Pitch Play and opens
- * the sequencer on a scene of its own -- and any track can be bounced to
+ * that makes that kind of sound -- AUDIO opens the Recorder, KITS asks whether
+ * it plays through a kit (picked in the kit loader) or Pitch Play and leaves
+ * it empty and armed, on a scene of its own: REC records the pads into it,
+ * CLIP EDIT opens its seq view (a Pitch track with no instrument picked yet
+ * opens Pitch Play, where one is) -- and any track can be bounced to
  * audio at any time, which is also how a seq slot is freed for the next idea.
  *
  * Audio tracks are laid out like a linear DAW: lanes, a bar ruler, every clip
@@ -2866,13 +2868,14 @@ void edit_cb(lv_event_t*)
 /*
  * The one flow in this screen that is not editing: making a track.
  *
- *   + ADD TRACK ──> "New track": AUDIO or SEQ
+ *   + ADD TRACK ──> "New track": AUDIO or KITS
  *                      |            |
  *                      |            +--> "plays with": KIT or PITCH
  *                      |                      |
- *                      +--> the Recorder       +--> the sequencer on its scene
- *
- *                                  (KIT: the kit loader first)
+ *                      +--> the Recorder       +--> an empty track, armed:
+ *                                                   REC records into it
+ *                    (KIT: the kit loader first; PITCH with no instrument
+ *                     yet: Pitch Play, to pick one)
  *
  * Every dialog says the same two things, because they are the rules a player
  * has to know before choosing and nobody reads them anywhere else: four
@@ -3086,6 +3089,16 @@ int make_seq_track(crosspad::SeqSource src, const std::string& kit)
 /// What KITS offers: the kit types, then Pitch Play.
 enum class NewSeq : uint8_t { Perf, Drums, Slice, Pitch };
 
+/// A seq track just made: picked, on the timeline, and nothing opened -- it
+/// is empty and armed, so the next REC records into it, and CLIP EDIT is
+/// there for whoever wants the seq view instead.
+void seq_track_made(int made)
+{
+    select(made, -1);
+    rebuild_timeline();
+    note_fmt("Track %d armed: REC records the pads, CLIP EDIT opens its seq view.", made + 1);
+}
+
 void choose_source_cb(lv_event_t* e)
 {
     const auto what = (NewSeq)(intptr_t)lv_event_get_user_data(e);
@@ -3099,9 +3112,15 @@ void choose_source_cb(lv_event_t* e)
     const auto src = crosspad::SeqSource::Pitch;
     const int made = make_seq_track(src, {});
     if (made < 0) { note("No room: all four tracks are in use, or a seq is already in the song."); return; }
-    select(made, -1);
-    rebuild_timeline();
-    open_seq_track(made);
+    /* With no instrument picked yet the track has no sound: Pitch Play is
+     * where one is picked, as the kit loader is for a kit track. */
+    if (crosspad::instrumentPlayState().instrumentPath.empty()) {
+        select(made, -1);
+        rebuild_timeline();
+        open_seq_track(made);
+        return;
+    }
+    seq_track_made(made);
 }
 
 // ── a kit track's kit ──────────────────────────────────────────────────────
@@ -3112,12 +3131,12 @@ void choose_source_cb(lv_event_t* e)
  * as a song's kit is; on the second it is the track's own, which the second
  * kit engine loads beside it. A pitched kit has an engine of its own that
  * takes the arena from both, so it is no second kit. The browser is up while
- * this screen is down: the pick changes the song, and the screen, back, opens
- * a new track's seq view (s_afterPick).
+ * this screen is down: the pick changes the song, and the screen, back, picks
+ * the new track (s_afterPick).
  */
 
 int s_kitPickTrack = -1;   ///< the track the kit loader picks for; -1 a new one
-int s_afterPick    = -1;   ///< a track made by the pick: its seq view once this screen is back
+int s_afterPick    = -1;   ///< a track made by the pick: picked once this screen is back
 crosspad::KitList s_kitPickList = crosspad::KitList::Any;   ///< the list the loader opens on
 
 void kit_picked(const std::string& path, void*)
@@ -3291,7 +3310,7 @@ void seq_source_sheet()
                kPitchT, pitch, choose_source_cb, (void*)(intptr_t)NewSeq::Pitch);
 
     sheet_rules(kitRoute == 1 ? "A second kit plays beside the first, five voices each."
-                              : "A kit track: pick its kit, then the seq view.",
+                              : "A kit track: pick its kit, then REC records into it.",
                 "Bounce turns a track into audio and frees its slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
@@ -4505,14 +4524,12 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 #ifdef ARR_USE_ENCODER
             if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
-            /* Back from the kit loader with a new kit track: its seq view, as
-             * a track made here opens. */
+            /* Back from the kit loader with a new kit track: picked, as a
+             * track made here is. */
             if (s_afterPick >= 0) {
                 const int made = s_afterPick;
                 s_afterPick = -1;
-                select(made, -1);
-                rebuild_timeline();
-                lv_async_call([](void* p) { open_seq_track((int)(intptr_t)p); }, (void*)(intptr_t)made);
+                seq_track_made(made);
             }
             /* Sent here by the seq view's BOUNCE: the question, on its track. */
             crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
