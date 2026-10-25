@@ -510,11 +510,12 @@ void rebuild_timeline()
             lv_label_set_long_mode(lb, LV_LABEL_LONG_CLIP);
             lv_obj_set_width(lb, LV_PCT(100));
             /* A block of its own notes is the seq track's part; one that
-             * plays the scene says which. */
-            if (c.isElement()) elements_style_block(o, lb, c);
-            else if (seq && c.notes) lv_label_set_text(lb, "SEQ");
-            else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
-            else                lv_label_set_text(lb, short_name(c.file).c_str());
+             * plays the scene says which; an element's is styled with its Block. */
+            if (!c.isElement()) {
+                if (seq && c.notes) lv_label_set_text(lb, "SEQ");
+                else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
+                else                lv_label_set_text(lb, short_name(c.file).c_str());
+            }
 
             Block b;
             b.obj = o;
@@ -527,6 +528,7 @@ void rebuild_timeline()
             b.fitted = song.tracks[tr].stretch != crosspad::StretchMode::Off;
             b.muted = song.silenced(tr);
             b.element = c.isElement();
+            if (b.element) elements_style_block(o, lb, c, b);
             b.seq = seq;
             b.notes = c.notes;
             b.scene = song.tracks[tr].scene;

@@ -838,6 +838,7 @@ void edit_cb(lv_event_t*)
     if (block) overlay_item("Loop region = the selected block", region_block_cb, nullptr);
     if (region) {
         overlay_item(LV_SYMBOL_COPY " Copy the region", region_copy_cb, nullptr);
+        overlay_item(LV_SYMBOL_LIST " Make element from region", element_region_cb, nullptr);
         char buf[64];
         if (!s_clipboard.empty()) {
             std::snprintf(buf, sizeof(buf), LV_SYMBOL_PASTE " Paste %u bars at the region", (unsigned)s_clipboardBars);

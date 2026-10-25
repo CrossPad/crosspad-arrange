@@ -151,6 +151,7 @@ void tick_cb(lv_timer_t*)
         if (s_loading) { lv_obj_delete(s_loading); s_loading = nullptr; }
         if (what == Pending::Projects) fill_projects();
         else if (what == Pending::Clips) fill_clips();
+        else if (what == Pending::Songs) fill_library_songs();
         else                           fill_elements();
     }
     elements_tick(se);

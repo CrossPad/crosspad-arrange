@@ -171,6 +171,8 @@ struct Block {
     uint8_t     peakMax = 0;       ///< the loudest value: the waveform is drawn to it
     bool        missing = false;   ///< its file is not in the project's clips folder
     bool        element = false;   ///< plays an element's bake, not a clip: no waveform, no peaks
+    crosspad::ElementClipState elementState = crosspad::ElementClipState::Fresh;   ///< as drawn
+    lv_obj_t*   bakeBar = nullptr; ///< an element block's progress while its new bake is made
     /* A seq block: its own notes, or -- null -- the track's scene, from its
      * bar @c from of them. */
     bool        seq = false;
@@ -200,7 +202,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 
 /* The card is read on the platform's side; an overlay opens at once with a
  * line saying so and is filled when the list comes back. */
-enum class Pending : uint8_t { None, Projects, Clips, Elements };
+enum class Pending : uint8_t { None, Projects, Clips, Elements, Songs };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
 enum class EditKind : uint8_t { Tempo, Rename, Delete, Export };
@@ -388,12 +390,15 @@ void elements_group_add(lv_group_t* g);
 void elements_tick(crosspad::ISongEngine* se);
 bool elements_back();
 bool elements_clip_edit();
-void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c);
+/// Draws an element block against its bake; fills @p b's state and progress bar.
+void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c, Block& b);
 void elements_destroy();
 bool elements_list_pending();
 void element_new_cb(lv_event_t*);
 void element_library_cb(lv_event_t*);
 void fill_elements();
+void fill_library_songs();
+void element_region_cb(lv_event_t*);
 bool element_progress(char* buf, size_t cap);
 const char* element_title(const std::string& ref);
 

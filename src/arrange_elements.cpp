@@ -28,6 +28,10 @@ constexpr int32_t     kGlyphTop       = 3;
 constexpr int32_t     kGlyphLabelGap  = 4;
 constexpr uint32_t    kToastMs        = 3000;
 constexpr int         kLibraryRows    = 32;
+constexpr int32_t     kBakeBarH       = 3;      ///< the progress bar along an element block's bottom edge
+constexpr int32_t     kHatchH         = 5;      ///< a stale block's hatched edge
+constexpr int32_t     kHatchPitch     = 4;
+constexpr int32_t     kHatchLineW     = 1;
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
 
 lv_obj_t* s_crumbRow = nullptr;
@@ -45,6 +49,13 @@ uint32_t s_libraryGen    = 0;
 /// Where the level being left sat in the song above, for the click that lands there.
 int      s_returnTrack = -1;
 uint32_t s_returnBar   = 0;
+
+/// Where the last insert or make laid its block, to say on a failure whether it
+/// did: the track (-1: whichever the job chose), the bar, and how many element
+/// blocks the song held before.
+int      s_laidTrack = -1;
+uint32_t s_laidBar   = 0;
+size_t   s_laidBefore = 0;
 
 bool       s_busy = false;                 ///< the shield and the empty encoder group are up
 lv_obj_t*  s_shield = nullptr;
@@ -180,6 +191,37 @@ void ask_library(crosspad::ISongEngine* se)
     s_libraryAsked = se->requestElements();
 }
 
+/// Element blocks on @p track, or on every track when it is -1.
+size_t element_blocks(const crosspad::AudioSong& song, int track)
+{
+    size_t n = 0;
+    for (int t = 0; t < kTracks; ++t) {
+        if (track >= 0 && t != track) continue;
+        for (const auto& c : song.tracks[t].clips) n += c.isElement() && c.bar == s_laidBar;
+    }
+    return n;
+}
+
+/// The job is about to lay a block on @p track (-1: wherever it picks) at @p bar.
+void expect_block(crosspad::ISongEngine* se, int track, uint32_t bar)
+{
+    s_laidTrack = track;
+    s_laidBar = bar;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    s_laidBefore = element_blocks(se->song(), track);
+}
+
+/// A job that failed left its block on a track: the engine is inside the
+/// element (the block was laid before it was entered), or the song holds one
+/// more block at that bar than it did. An insert that failed at the copy, and
+/// a make that was refused, laid none.
+bool block_was_laid(crosspad::ISongEngine* se)
+{
+    if (crosspad::elementNav().depth() > 0) return true;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    return element_blocks(se->song(), s_laidTrack) > s_laidBefore;
+}
+
 // ── the lane an element is laid on ─────────────────────────────────────────
 
 /// A track with no block over bars [bar, bar + bars): the selected audio track
@@ -216,7 +258,29 @@ void library_pick_cb(lv_event_t* e)
         track = free_track(se->song(), bar, std::max<uint16_t>(1, s_library[i].bars));
     }
     if (track < 0) { note("No audio track is free there."); return; }
+    expect_block(se, track, bar);
     if (!nav.insertExisting(track, bar, s_library[i].ref)) note(nav.lastError().c_str());
+}
+
+void song_pick_cb(lv_event_t* e)
+{
+    const size_t i = (size_t)(intptr_t)lv_event_get_user_data(e);
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    auto& nav = crosspad::elementNav();
+    if (nav.busy()) return;
+    const auto songs = se->projects();
+    if (i >= songs.size()) return;
+    const uint32_t bar = playhead_bar();
+    int track = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        track = free_track(se->song(), bar, 1);    // its length is known once it is copied; the job refuses an overlap
+    }
+    if (track < 0) { note("No audio track is free there."); return; }
+    expect_block(se, track, bar);
+    if (!nav.insertSong(track, bar, songs[i])) note(nav.lastError().c_str());
 }
 
 // ── while a job runs ───────────────────────────────────────────────────────
@@ -345,6 +409,24 @@ void elements_group_add(lv_group_t* g)
 }
 #endif
 
+/// An element block's bake moving on: a change of state redraws the timeline, a
+/// bake under way moves its bar.
+static void watch_bakes(crosspad::ISongEngine* se)
+{
+    bool moved = false;
+    const uint8_t progress = se->backgroundProgress();
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        for (int k = 0; k < s_blockCount; ++k) {
+            Block& b = s_blocks[k];
+            if (!b.element) continue;
+            if (se->elementClipState((uint8_t)b.track, (size_t)b.index) != b.elementState) { moved = true; break; }
+            if (b.bakeBar) lv_obj_set_width(b.bakeBar, lv_pct(progress));
+        }
+    }
+    if (moved) rebuild_timeline();
+}
+
 void elements_tick(crosspad::ISongEngine* se)
 {
     auto& nav = crosspad::elementNav();
@@ -356,8 +438,10 @@ void elements_tick(crosspad::ISongEngine* se)
     if (r.done) {
         if (!r.ok) {
             std::string msg = r.error.empty() ? nav.lastError() : r.error;
-            /* An insert lays the block before its job starts: it stays, unbaked. */
-            if (r.job == crosspad::ElementNav::Job::Insert) msg += "\nThe block stays on the track, not baked.";
+            /* A block is laid before its job bakes it: it stays, unbaked. A job that
+             * failed before that left the song as it was. */
+            const bool lays = r.job == crosspad::ElementNav::Job::Insert || r.job == crosspad::ElementNav::Job::Make;
+            if (lays && block_was_laid(se)) msg += "\nThe block stays on the track, not baked.";
             ui_toast_show(msg.c_str(), kToastMs, UI_TOAST_ERROR);
         } else if (r.job == crosspad::ElementNav::Job::Leave) {
             select_returned();
@@ -370,6 +454,7 @@ void elements_tick(crosspad::ISongEngine* se)
         s_libraryKnown = false;
         rebuild_timeline();
     }
+    watch_bakes(se);
     ask_library(se);
 }
 
@@ -397,13 +482,41 @@ bool elements_clip_edit()
     return true;
 }
 
-void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c)
+/// The hatching along a stale block's bottom edge: slanted lines, as the song's
+/// own "old" mark -- the block plays the bake it has, not the element as it is.
+static void stale_edge_cb(lv_event_t* e)
 {
+    lv_obj_t* o = lv_event_get_target_obj(e);
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    lv_draw_line_dsc_t d;
+    lv_draw_line_dsc_init(&d);
+    d.color = kInk;
+    d.width = kHatchLineW;
+    d.opa = LV_OPA_COVER;
+    for (int32_t x = a.x1; x <= a.x2; x += kHatchPitch) {
+        d.p1.x = x;
+        d.p1.y = a.y2;
+        d.p2.x = x + kHatchH;
+        d.p2.y = a.y2 - kHatchH;
+        lv_draw_line(layer, &d);
+    }
+}
+
+void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c, Block& b)
+{
+    using crosspad::ElementClipState;
+    auto* se = engine();
     lv_obj_set_style_bg_color(block, kIce, 0);
-    /* Not baked yet: it has no sound of its own to show, and says so. A silenced
-     * track's block is already faded; that is kept. */
+    const ElementClipState st = se ? se->elementClipState((uint8_t)b.track, (size_t)b.index) : ElementClipState::Fresh;
+    b.elementState = st;
+    /* Not baked yet, or its bake is not on the card: it has no sound of its
+     * own to show, and says so. A silenced track's block is already faded; that
+     * is kept. */
     const bool baked = !c.file.empty();
-    if (!baked && lv_obj_get_style_bg_opa(block, LV_PART_MAIN) == LV_OPA_COVER)
+    const bool silent = st == ElementClipState::Missing || !baked;
+    if (silent && lv_obj_get_style_bg_opa(block, LV_PART_MAIN) == LV_OPA_COVER)
         lv_obj_set_style_bg_opa(block, LV_OPA_50, 0);
     /* Three bars stacked: layers. Inert, so a touch lands on the block. */
     for (int i = 0; i < kGlyphBars; ++i) {
@@ -416,7 +529,23 @@ void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::Song
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_set_x(label, kGlyphW + kGlyphLabelGap);
-    set_text_fmt(label, baked ? "%s" : "%s - not baked", element_title(c.element));
+    const char* title = element_title(c.element);
+    if (st == ElementClipState::Missing)      set_text_fmt(label, "%s - no bake", title);
+    else if (st == ElementClipState::Stale)   set_text_fmt(label, "%s  old", title);
+    else if (st == ElementClipState::Baking)  set_text_fmt(label, "%s", title);
+    else                                      set_text_fmt(label, baked ? "%s" : "%s - not baked", title);
+    if (st == ElementClipState::Stale) lv_obj_add_event_cb(block, stale_edge_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+    if (st == ElementClipState::Baking) {
+        lv_obj_t* bar = lv_obj_create(block);
+        lv_obj_remove_style_all(bar);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
+        lv_obj_set_size(bar, lv_pct(se->backgroundProgress()), kBakeBarH);
+        lv_obj_align(bar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_set_style_bg_color(bar, kAudioT, 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        b.bakeBar = bar;
+    }
 }
 
 void element_new_cb(lv_event_t*)
@@ -434,6 +563,7 @@ void element_new_cb(lv_event_t*)
     if (track < 0) { note("No audio track is free there."); return; }
     char title[32];
     std::snprintf(title, sizeof(title), "ELEMENT %u", (unsigned)s_library.size() + 1);
+    expect_block(se, track, bar);
     if (!nav.insertNew(track, bar, title)) note(nav.lastError().c_str());
 }
 
@@ -459,7 +589,49 @@ void fill_elements()
         lv_obj_set_style_text_color(l, kDim, 0);
         lv_label_set_text(l, "No elements yet -- EDIT > New element here.");
     }
+    /* Songs follow once the card has listed them: Cancel stays last. */
+    s_pendingGen = se->listGeneration();
+    if (se->requestProjects()) {
+        s_pending = Pending::Songs;
+        s_loading = lv_label_create(s_overlay);
+        lv_obj_set_style_text_color(s_loading, kDim, 0);
+        lv_label_set_text(s_loading, "Reading songs ...");
+        return;
+    }
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
+void fill_library_songs()
+{
+    auto* se = engine();
+    if (!se || !s_overlay) return;
+    /* The song the elements hang under, and with it every ancestor an element
+     * of it could be inserted into: a song cannot hold itself. */
+    const std::string root = crosspad::elementNav().path().front().open;
+    lv_obj_t* head = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(head, kDim, 0);
+    lv_label_set_text(head, "Songs");
+    const auto songs = se->projects();
+    for (size_t i = 0; i < songs.size() && i < (size_t)kLibraryRows; ++i)
+        if (songs[i] != root) overlay_item(songs[i].c_str(), song_pick_cb, (void*)(intptr_t)i);
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
+void element_region_cb(lv_event_t*)
+{
+    auto* se = engine();
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (!se || nav.busy()) return;
+    uint32_t from = 0, to = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        if (!se->song().hasRegion()) return;
+        from = se->song().loopStart;
+        to = se->song().loopEnd;
+    }
+    expect_block(se, -1, from);
+    if (!nav.makeFromRegion(from, to)) note(nav.lastError().c_str());
 }
 
 bool element_progress(char* buf, size_t cap)
