@@ -475,6 +475,7 @@ static void pick_project(int i)
     if (!se || name.empty()) return;
     s_selTrack = 0;
     s_selIndex = -1;
+    crosspad::elementNav().reset();     // another song: the breadcrumb starts over
     s_opening = se->requestOpen(name);
     if (s_opening) note_fmt("Opening %s ...", name.c_str());
 }
@@ -488,12 +489,14 @@ static void new_song_cb(lv_event_t*)
     if (s_pending != Pending::Projects) pick_project(-1);
 }
 
-static void request_list(Pending what, const char* title)
+void request_list(Pending what, const char* title)
 {
     auto* se = engine();
     if (!se || s_overlay) return;
     s_pendingGen = se->listGeneration();
-    const bool asked = what == Pending::Projects ? se->requestProjects() : se->requestClips();
+    const bool asked = what == Pending::Projects ? se->requestProjects()
+                     : what == Pending::Clips  ? se->requestClips()
+                                               : se->requestElements();
     const char* wait = asked ? "Reading the card ..." : "The card is busy, try again.";
     if (what == Pending::Projects) {
         song_window(title, cancel_cb, LV_SYMBOL_PLUS " NEW", new_song_cb);

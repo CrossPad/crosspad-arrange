@@ -65,7 +65,8 @@ static uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two
 
 static void auto_freeze(crosspad::ISongEngine* se)
 {
-    if (!se || se->openState() != crosspad::SongOpState::Ready) return;
+    /* An element's enter or leave freezes the tracks it needs itself. */
+    if (!se || se->openState() != crosspad::SongOpState::Ready || crosspad::elementNav().busy()) return;
     int armed = -1;
     std::string dir;
     bool live[kTracks] = {};

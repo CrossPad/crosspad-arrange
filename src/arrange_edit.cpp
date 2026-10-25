@@ -331,9 +331,11 @@ static void leave_region_edit();
 /// the screen, and a click spent unpicking it showed nothing but a 2 px
 /// outline going, so getting out took two clicks or more (12.10.2026). (The
 /// encoder's edit mode and the top bar's focus are stepped out of before this
-/// is asked: powerBack().)
+/// is asked: powerBack().) Inside an element, what is left goes up one level
+/// (elements_back()); while that is being baked, a click is spent on waiting.
 bool back_handler(lv_obj_t*)
 {
+    if (crosspad::elementNav().busy()) return true;
     if (s_overlay) {
         for (auto& t : s_mergeToggles) t = nullptr;
         close_overlay();
@@ -347,7 +349,7 @@ bool back_handler(lv_obj_t*)
         leave_tools();
         return true;
     }
-    return false;
+    return elements_back();
 }
 
 /// A long press on a track's header: an audio track's input (with MIX beside
@@ -824,6 +826,8 @@ void edit_cb(lv_event_t*)
      * for a clip the project already has. */
     overlay_item(LV_SYMBOL_PLUS " Add a clip from the library ...",
                  [](lv_event_t* e) { close_overlay(); add_cb(e); }, nullptr);
+    overlay_item(LV_SYMBOL_PLUS " New element here", element_new_cb, nullptr);
+    overlay_item(LV_SYMBOL_LIST " Element from library ...", element_library_cb, nullptr);
     if (tracked) {
         char cut[48];
         std::snprintf(cut, sizeof(cut), LV_SYMBOL_CUT " Cut track %d at bar %u", s_selTrack + 1,

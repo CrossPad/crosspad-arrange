@@ -161,7 +161,7 @@ void take_peaks(crosspad::ISongEngine* se)
         Block& b = s_blocks[i];
         crosspad::ClipPeaks cp;
         /* A seq block has no file: its notes are drawn from the scene. */
-        if (b.peaks || !b.obj || b.file.empty() || !se->clipPeaks(b.file, cp)) continue;
+        if (b.peaks || !b.obj || b.element || b.file.empty() || !se->clipPeaks(b.file, cp)) continue;
         set_peaks(b, cp);
         lv_obj_invalidate(b.obj);
     }
@@ -326,6 +326,7 @@ static void rebuild_group()
     lv_group_add_obj(s_encGroup, s_syncBtn);
     lv_group_add_obj(s_encGroup, s_loopBtn);
     lv_group_add_obj(s_encGroup, s_zoomBtn);
+    elements_group_add(s_encGroup);
     for (int i = 0; i < s_blockCount; ++i) lv_group_add_obj(s_encGroup, s_blocks[i].obj);
     if (s_seqBlock) lv_group_add_obj(s_encGroup, s_seqBlock);
     for (auto* h : s_heads) {
@@ -379,7 +380,7 @@ void rebuild_timeline()
         for (int t = 0; t < kTracks; ++t) {
             const auto& cs = mut.tracks[t].clips;
             if (mut.tracks[t].inUse && mut.tracks[t].kind == crosspad::TrackKind::Seq &&
-                std::any_of(cs.begin(), cs.end(), [](const crosspad::SongClip& c) { return !c.file.empty(); })) {
+                std::any_of(cs.begin(), cs.end(), [](const crosspad::SongClip& c) { return !c.file.empty() && !c.isElement(); })) {
                 mut.bounceSeqTrack(t);
                 healed = true;
             }
@@ -498,8 +499,12 @@ void rebuild_timeline()
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
-            lv_obj_add_event_cb(o, seq ? seq_draw_cb : block_draw_cb, LV_EVENT_DRAW_MAIN_END,
-                                (void*)(intptr_t)s_blockCount);
+            /* An element has no waveform and no notes of its own to draw
+             * here: it is a whole arrangement, baked. */
+            if (!c.isElement()) {
+                lv_obj_add_event_cb(o, seq ? seq_draw_cb : block_draw_cb, LV_EVENT_DRAW_MAIN_END,
+                                    (void*)(intptr_t)s_blockCount);
+            }
 
             lv_obj_t* lb = lv_label_create(o);
             lv_obj_set_style_text_font(lb, &lv_font_montserrat_10, 0);
@@ -508,7 +513,8 @@ void rebuild_timeline()
             lv_obj_set_width(lb, LV_PCT(100));
             /* A block of its own notes is the seq track's part; one that
              * plays the scene says which. */
-            if (seq && c.notes) lv_label_set_text(lb, "SEQ");
+            if (c.isElement()) elements_style_block(o, lb, c);
+            else if (seq && c.notes) lv_label_set_text(lb, "SEQ");
             else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
             else                lv_label_set_text(lb, short_name(c.file).c_str());
 
@@ -522,12 +528,13 @@ void rebuild_timeline()
             b.bars = c.bars;
             b.fitted = song.tracks[tr].stretch != crosspad::StretchMode::Off;
             b.muted = song.silenced(tr);
+            b.element = c.isElement();
             b.seq = seq;
             b.notes = c.notes;
             b.scene = song.tracks[tr].scene;
             b.from = c.from;
             crosspad::ClipPeaks cp;
-            if (!seq && se->clipPeaks(c.file, cp)) set_peaks(b, cp);
+            if (!seq && !b.element && se->clipPeaks(c.file, cp)) set_peaks(b, cp);
             s_blocks[s_blockCount++] = std::move(b);
         }
     }
@@ -649,6 +656,7 @@ void rebuild_timeline()
     const auto& sel = song.tracks[s_selTrack].clips;
     if (s_selIndex >= (int)sel.size()) s_selIndex = (int)sel.size() - 1;
     s_shape = song_shape(song);
+    elements_refresh_crumbs();
     rebuild_group();
     place_move_arrows();
     select(s_selTrack, s_selIndex);

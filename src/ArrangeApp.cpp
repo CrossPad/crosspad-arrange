@@ -306,6 +306,7 @@ uint32_t song_shape(const crosspad::AudioSong& s)
             mix(c.bar); mix(c.bars); mix(c.offset); mix(c.frames); mix(c.from);
             mix((uint32_t)(uintptr_t)c.notes.get());   // a dub, the seq view: new notes, same bars
             for (char ch : c.file) mix((uint8_t)ch);
+            for (char ch : c.element) mix((uint8_t)ch);   // an element's bake lands in file, its title in the list
         }
     }
     return h;
@@ -429,15 +430,16 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     /* FOLLOW, an arrow beside the position it follows; the keys after it a
      * little narrower than the export's, to make the room. */
     s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
-    place(s_followBtn, 112, ARR_Y(35));
+    place(s_followBtn, kCtxSong.follow, ARR_Y(35));
     s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
     place(s_editBtn, 139, ARR_Y(35));
     s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
     place(s_syncBtn, 180, ARR_Y(35));
     s_loopBtn = make_button(s_root, 42, "LOOP", loop_cb);
-    place(s_loopBtn, 225, ARR_Y(35));
+    place(s_loopBtn, kCtxSong.loop, ARR_Y(35));
     s_zoomBtn = make_button(s_root, 42, "ZOOM", zoom_cycle_cb);
-    place(s_zoomBtn, 270, ARR_Y(35));
+    place(s_zoomBtn, kCtxSong.zoom, ARR_Y(35));
+    elements_build_crumbs(s_root);
 
     /* ── lanes: the track buttons fixed, the timeline scrolling beside them ──
      * The export's LANE_X=48 and a lane block from screen y=62 to 200. */
@@ -773,6 +775,7 @@ void Arrange_destroy(lv_obj_t* root)
     if (s_toolGroup) { lv_group_delete(s_toolGroup); s_toolGroup = nullptr; }
     if (s_regionGroup) { lv_group_delete(s_regionGroup); s_regionGroup = nullptr; }
 #endif
+    elements_destroy();
     s_toolMode = false;
     s_regionEdit = RegionEdit::None;
     s_regionHandle = nullptr;

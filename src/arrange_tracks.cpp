@@ -856,7 +856,8 @@ void track_menu()
 /// whose SEQ key leads on to the notes); an audio track opens the Recorder on
 /// the block picked -- or the one under the playhead -- to trim it and put it
 /// back where it was, or, on an empty bar, to record into the track. The
-/// timeline's editing is the EDIT beside SYNC (edit_cb).
+/// timeline's editing is the EDIT beside SYNC (edit_cb). An element block opens
+/// as the song it is, one level down the breadcrumb.
 void clip_edit_cb(lv_event_t*)
 {
     auto* se = engine();
@@ -869,6 +870,7 @@ void clip_edit_cb(lv_event_t*)
         seq = t.kind == crosspad::TrackKind::Seq;
     }
     if (!inUse) { note("Pick a track or a block first -- EDIT at the top edits the timeline."); return; }
+    if (elements_clip_edit()) return;
     if (seq) { open_seq_track(s_selTrack); return; }
     int pickedBar = -1;
     {

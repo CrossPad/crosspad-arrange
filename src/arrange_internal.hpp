@@ -29,6 +29,7 @@
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/song/ArrangeAudioTake.hpp"
 #include "crosspad/song/ArrangeFocus.hpp"
+#include "crosspad/song/ElementNav.hpp"
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad/song/SeqTrackSound.hpp"
 #include "crosspad/transport/SongTransport.hpp"
@@ -70,6 +71,15 @@ inline constexpr int      kTracks   = crosspad::AudioSong::kTracks;
  * it. */
 inline constexpr int32_t  kExportTop = 33;
 #define ARR_Y(v) ((v) - kExportTop)
+/* The context row's keys that move when an element is open: the breadcrumbs
+ * take the place of the project button, the position, EDIT and SYNC, and the
+ * keys left close up behind them; EDIT goes to the key at the row's end. */
+struct CtxKeys { int32_t follow, loop, zoom; };
+inline constexpr CtxKeys kCtxSong    = {112, 225, 270};
+inline constexpr CtxKeys kCtxElement = {152, 180, 225};
+inline constexpr int32_t kCtxMoreX   = 270;       ///< where ZOOM stood
+inline constexpr int32_t kCrumbsW    = kCtxElement.follow - 4 - 6;   ///< from the row's left edge to FOLLOW
+
 /* Zoom: pixels per bar -- a whole song on one screen, phrases, single beats
  * (UX 2000 section 7.3: three levels). */
 inline constexpr int32_t  kZoomPx[] = {3, 12, 48};
@@ -160,6 +170,7 @@ struct Block {
     std::shared_ptr<const std::vector<uint8_t>> peaks;
     uint8_t     peakMax = 0;       ///< the loudest value: the waveform is drawn to it
     bool        missing = false;   ///< its file is not in the project's clips folder
+    bool        element = false;   ///< plays an element's bake, not a clip: no waveform, no peaks
     /* A seq block: its own notes, or -- null -- the track's scene, from its
      * bar @c from of them. */
     bool        seq = false;
@@ -189,7 +200,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 
 /* The card is read on the platform's side; an overlay opens at once with a
  * line saying so and is filled when the list comes back. */
-enum class Pending : uint8_t { None, Projects, Clips };
+enum class Pending : uint8_t { None, Projects, Clips, Elements };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
 enum class EditKind : uint8_t { Tempo, Rename, Delete, Export };
@@ -366,5 +377,23 @@ void mix_cb(lv_event_t*);
 bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
 void sound_keeper_cb(lv_timer_t*);
 void sound_keeper_start();
+void request_list(Pending what, const char* title);
+
+// Elements (arrange_elements.cpp): arrangements inside the song, one level at a time.
+void elements_build_crumbs(lv_obj_t* parent);
+void elements_refresh_crumbs();
+#ifdef ARR_USE_ENCODER
+void elements_group_add(lv_group_t* g);
+#endif
+void elements_tick(crosspad::ISongEngine* se);
+bool elements_back();
+bool elements_clip_edit();
+void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c);
+void elements_destroy();
+void element_new_cb(lv_event_t*);
+void element_library_cb(lv_event_t*);
+void fill_elements();
+bool element_progress(char* buf, size_t cap);
+const char* element_title(const std::string& ref);
 
 } // namespace arrange_ui

@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.21.0,<3.0.0",
+    "crosspad-core": ">=2.23.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.24.0: elements -- arrangements inside the song (core 2.23). EDIT > New element here lays a four-bar element on a free audio track and opens it; Element from library lays one already made. An element block is ice blue with a layers glyph and its title (dimmed, not baked, until its first leave); CLIP EDIT on it opens it as the song, the context row becomes the breadcrumb SONG > ELEMENT 1 (three levels at most, ... for the rest, a tap goes up to that level), and the power button's click goes one level up, freezing and baking what changed, with the processing box saying how far. Requires core 2.23.",
     "0.23.0: MIX looks like a DAW's mixer -- each strip has the track's number and kind (or name) in its colour, PAN (C / L25 / R40, a tap on its reading centres it; kept with the song, core 2.21 SongTrack::pan), the fader with the track's stereo meter beside it (after the fader and pan, the lanes' scale: green, amber from -6 dB, red from -1), the dB, and M and S side by side; requires core 2.21",
     "0.22.0: an audio track's input sheet (a long press on its header) has MONITOR: the input it records heard live on the speakers and jacks, or not -- the Mixer's MONITOR at all or off for that input's channels (MIC+LINE both), shown in the Mixer and kept with its desk; absent for the pads, heard anyway; requires core 2.20 (IInputMonitor)",
     "0.21.1: an audio take round a loop says how many passes it kept -- the last is on the track, the others are clips to pick with EDIT (core 2.19). Requires core 2.19.",
