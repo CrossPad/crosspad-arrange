@@ -63,6 +63,9 @@ std::string s_crumbKey = kCrumbKeyNone;       ///< what the row was last built f
 /// The element library as the engine last listed it: block and crumb titles,
 /// the next "ELEMENT n", the picker's rows.
 std::vector<crosspad::ElementInfo> s_library;
+/// The songs the picker drew, by name: a row picked is the song it showed,
+/// whatever the engine has listed since.
+std::vector<std::string> s_pickSongs;
 bool     s_libraryWanted = true;          ///< a title is not known: ask the engine for the list
 bool     s_libraryKnown  = false;         ///< the list came in since an element was last made or opened
 bool     s_libraryAsked  = false;
@@ -319,8 +322,8 @@ void song_pick_cb(lv_event_t* e)
     if (!se) return;
     auto& nav = crosspad::elementNav();
     if (nav.busy()) return;
-    const auto songs = se->projects();
-    if (i >= songs.size()) return;
+    if (i >= s_pickSongs.size()) return;
+    const std::string song = s_pickSongs[i];
     const uint32_t bar = playhead_bar();
     int track = -1;
     {
@@ -329,7 +332,7 @@ void song_pick_cb(lv_event_t* e)
     }
     if (track < 0) { note("No audio track is free there."); return; }
     expect_block(se, track, bar);
-    if (!nav.insertSong(track, bar, songs[i])) note(nav.lastError().c_str());
+    if (!nav.insertSong(track, bar, song)) note(nav.lastError().c_str());
 }
 
 // ── while a job runs ───────────────────────────────────────────────────────
@@ -1031,7 +1034,8 @@ void element_library_cb(lv_event_t*)
     request_list(Pending::Elements, "Element from library");
 }
 
-/// One row of the picker: an element of the library or a song to copy into it.
+/// One row of the picker: an element of the library or a song to copy into it
+/// (@c index into s_library or s_pickSongs).
 struct PickRow { bool song; size_t index; };
 
 static bool s_songsBusy = false;       ///< the card would not list the songs
@@ -1057,9 +1061,13 @@ static void render_picker(size_t from)
     const auto songs = se->projects();
     std::vector<PickRow> rows;
     for (size_t i = 0; i < s_library.size(); ++i) rows.push_back({false, i});
+    s_pickSongs.clear();
     if (!s_songsBusy)
-        for (size_t i = 0; i < songs.size(); ++i)
-            if (songs[i] != root) rows.push_back({true, i});
+        for (const std::string& song : songs)
+            if (song != root) {
+                rows.push_back({true, s_pickSongs.size()});
+                s_pickSongs.push_back(song);
+            }
     if (from >= rows.size()) from = 0;
     const size_t to = std::min(rows.size(), from + (size_t)kLibraryRows);
 
@@ -1086,7 +1094,7 @@ static void render_picker(size_t from)
             lv_obj_t* b = overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
             lv_obj_add_event_cb(b, library_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)rows[k].index);
         } else {
-            overlay_item(songs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
+            overlay_item(s_pickSongs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
         }
     }
     if (to < rows.size()) overlay_item(LV_SYMBOL_DOWN " More...", picker_page_cb, (void*)(intptr_t)to);
