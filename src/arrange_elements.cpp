@@ -355,7 +355,10 @@ void elements_tick(crosspad::ISongEngine* se)
     if (nav.busy() && se->playing()) se->stop();
     if (r.done) {
         if (!r.ok) {
-            ui_toast_show(r.error.empty() ? nav.lastError().c_str() : r.error.c_str(), kToastMs, UI_TOAST_ERROR);
+            std::string msg = r.error.empty() ? nav.lastError() : r.error;
+            /* An insert lays the block before its job starts: it stays, unbaked. */
+            if (r.job == crosspad::ElementNav::Job::Insert) msg += "\nThe block stays on the track, not baked.";
+            ui_toast_show(msg.c_str(), kToastMs, UI_TOAST_ERROR);
         } else if (r.job == crosspad::ElementNav::Job::Leave) {
             select_returned();
         } else {
