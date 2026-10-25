@@ -14,7 +14,7 @@ void close_overlay()
     elements_overlay_closed();
     if (!s_overlay) return;
 #ifdef ARR_USE_ENCODER
-    if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
+    if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, elements_group_after_overlay(s_encGroup));
     lv_group_delete_deferred(s_overlayGroup);     // the click that closed it is still being read
     s_overlayGroup = nullptr;
 #endif

@@ -399,6 +399,8 @@ bool elements_back();
 bool elements_ask_back();
 /// An overlay was closed: it was not the question any more.
 void elements_overlay_closed();
+/// The encoder group to give back when an overlay closes: the job's empty one while it runs.
+lv_group_t* elements_group_after_overlay(lv_group_t* base);
 /// The delete of an element ended: the library is read again, a refusal names its users.
 void element_delete_done(bool ok);
 bool elements_clip_edit();

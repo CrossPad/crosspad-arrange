@@ -34,6 +34,7 @@ constexpr int32_t     kHatchPitch     = 4;
 constexpr int32_t     kHatchLineW     = 1;
 constexpr char        kUntitled[]     = "ELEMENT";   ///< a block whose element is not named (yet)
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
+constexpr bool        kKeepEdit       = true;   ///< show_draft's Continue, as draft_cb reads it
 constexpr size_t      kReportLinesShown = 6;    ///< a refused delete names its users, this many lines
 constexpr int32_t     kSoloH          = kRulerH + 3;   ///< the SOLO key: the free cell above the heads, less a pixel under it
 constexpr int32_t     kMiniTapSlackPx = 6;      ///< a finger on the strip this close to a pass is on it
@@ -386,7 +387,7 @@ void answer_cb(lv_event_t* e)
 
 void draft_cb(lv_event_t* e)
 {
-    const bool keep = lv_event_get_user_data(e) != nullptr;
+    const bool keep = (bool)(intptr_t)lv_event_get_user_data(e);
     close_overlay();
     auto& nav = crosspad::elementNav();
     if (!nav.resolveDraft(keep)) note(nav.lastError().c_str());
@@ -424,7 +425,7 @@ void show_draft()
     close_overlay();
     overlay_keys(head.c_str());
     overlay_note("Continue keeps the edit. Restore puts the element back as it was before it.");
-    lv_obj_t* keep = overlay_key("Continue", draft_cb, (void*)(intptr_t)1);
+    lv_obj_t* keep = overlay_key("Continue", draft_cb, (void*)(intptr_t)kKeepEdit);
     overlay_key("Restore", draft_cb, nullptr);
     s_ask = Ask::Draft;
 #ifdef ARR_USE_ENCODER
@@ -453,7 +454,10 @@ void element_delete_cb(lv_event_t*)
     auto* se = engine();
     close_overlay();
     if (!se) return;
-    if (!se->requestDeleteElement(s_deleteRef)) { note("Not deleted: a song is playing, or the card is busy."); return; }
+    if (!se->requestDeleteElement(s_deleteRef)) {
+        note(se->playing() ? "Stop the song first." : "Not deleted: the card is busy.");
+        return;
+    }
     s_editing = true;
     s_editKind = EditKind::ElementDelete;
     note("Deleting ...");
@@ -482,6 +486,15 @@ void library_hold_cb(lv_event_t* e)
 
 } // namespace
 
+lv_group_t* elements_group_after_overlay(lv_group_t* base)
+{
+#ifdef ARR_USE_ENCODER
+    return s_busy && s_busyGroup ? s_busyGroup : base;
+#else
+    return base;
+#endif
+}
+
 void elements_overlay_closed()
 {
     s_ask = Ask::None;
@@ -495,6 +508,8 @@ bool elements_ask_back()
     if (s_ask == Ask::Question) {
         crosspad::elementNav().choose(crosspad::ElementNav::Choice::None);
         close_overlay();
+    } else {
+        note("Answer the unfinished edit first.");
     }
     return true;
 }
@@ -823,7 +838,9 @@ void elements_tick(crosspad::ISongEngine* se)
      * of stretched audio), and the top bar's PLAY is outside the shield. */
     if (nav.busy() && se->playing()) se->stop();
     if (r.done) {
-        if (!r.ok) {
+        if (r.calledOff) {
+            /* The user's own answer: nothing failed, nothing to say. */
+        } else if (!r.ok) {
             std::string msg = r.error.empty() ? nav.lastError() : r.error;
             /* A block is laid before its job bakes it: it stays, unbaked. A job that
              * failed before that left the song as it was. */
