@@ -126,6 +126,7 @@ inline const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
  * that looks like the others is read as one that plays. */
 inline const lv_color_t kMissing = lv_color_hex(0x6E757E);
 inline const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+inline const lv_color_t kFocus  = lv_color_hex(0xF0A23C);     // what plays live: the focus's blocks on the mini-map
 inline const lv_color_t kIce    = lv_color_hex(0x7FD4FF);     // a frozen track's name
 inline const lv_color_t kRec    = lv_color_hex(0xFF5C5C);     // the playhead while a take runs: REC's red
 inline const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
@@ -384,6 +385,10 @@ void request_list(Pending what, const char* title);
 // Elements (arrange_elements.cpp): arrangements inside the song, one level at a time.
 void elements_build_crumbs(lv_obj_t* parent);
 void elements_refresh_crumbs();
+/// SOLO of the focus, in the free cell above the track heads; the level above in
+/// miniature over the timeline's ruler.
+void elements_build_solo(lv_obj_t* heads);
+void elements_build_minimap(lv_obj_t* parent);
 #ifdef ARR_USE_ENCODER
 void elements_group_add(lv_group_t* g);
 #endif

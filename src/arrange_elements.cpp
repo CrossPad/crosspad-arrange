@@ -34,6 +34,14 @@ constexpr int32_t     kHatchPitch     = 4;
 constexpr int32_t     kHatchLineW     = 1;
 constexpr char        kUntitled[]     = "ELEMENT";   ///< a block whose element is not named (yet)
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
+constexpr int32_t     kSoloH          = kRulerH + 3;   ///< the SOLO key: the free cell above the heads, less a pixel under it
+constexpr int32_t     kMiniTapSlackPx = 6;      ///< a finger on the strip this close to a pass is on it
+constexpr int32_t     kMiniOutlineW   = 1;
+constexpr int32_t     kMiniFocusH     = 6;      ///< the focus's passes on the strip: the rest of the song is a line a track under them
+constexpr int32_t     kMiniProgressH  = 2;      ///< the context's bake, along the strip's bottom edge
+constexpr int32_t     kMiniTimelinePad = 2;     ///< the timeline's own top padding, where the ruler begins
+constexpr uint32_t    kHashSeed       = 2166136261u;    ///< FNV-1a
+constexpr uint32_t    kHashPrime      = 16777619u;
 
 lv_obj_t* s_crumbRow = nullptr;
 lv_obj_t* s_moreKey  = nullptr;
@@ -58,6 +66,14 @@ int      s_laidTrack = -1;
 uint32_t s_laidBar   = 0;
 size_t   s_laidBefore = 0;
 int      s_laidDepth  = 0;      ///< where the job was started: inside an element it is not 0
+
+lv_obj_t* s_soloKey = nullptr;                ///< SOLO, in the cell above the track heads
+lv_obj_t* s_mini = nullptr;                   ///< the level above in miniature, over the ruler
+lv_obj_t* s_miniProgress = nullptr;           ///< the context's bake along its edge
+uint32_t  s_miniKey = 0;                      ///< what the strip was last drawn from
+bool      s_solo = false;                     ///< the focus alone is heard
+int       s_soloDepth = -1;                   ///< the depth SOLO was last seen at
+crosspad::ContextState s_ctxState = crosspad::ContextState::None;   ///< as last seen, to toast an Incomplete once
 
 bool       s_busy = false;                 ///< the shield and the empty encoder group are up
 lv_obj_t*  s_shield = nullptr;
@@ -404,9 +420,209 @@ void elements_refresh_crumbs()
     }
 }
 
+// ── the mini-map and SOLO ──────────────────────────────────────────────────
+
+namespace {
+
+void solo_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se || crosspad::elementNav().depth() == 0) return;
+    s_solo = !s_solo;
+    se->contextSolo(s_solo);
+    style_toggle(s_soloKey, s_solo, kKitT);
+}
+
+/// Where a bar of the level above falls on the strip.
+struct MiniScale {
+    int32_t  w = 0;
+    uint32_t bars = 1;
+    int32_t x(uint32_t bar) const { return (int32_t)((uint64_t)bar * (uint32_t)w / bars); }
+};
+
+/// How many bars of the level above an occurrence sounds for, at least one.
+uint32_t occurrence_bars(const crosspad::ElementNav::Occurrence& o, uint32_t framesPerBar)
+{
+    if (!framesPerBar) return 1;
+    return std::max<uint32_t>(1, (o.frames + framesPerBar - 1) / framesPerBar);
+}
+
+/// A tap on the strip: the pass under the finger (a few pixels either side of it), chosen,
+/// with the playhead at where in the element it begins.
+void mini_cb(lv_event_t*)
+{
+    auto* se = engine();
+    auto& nav = crosspad::elementNav();
+    lv_indev_t* in = lv_indev_active();
+    if (!se || !in || !s_mini || nav.depth() == 0 || nav.busy()) return;
+    const auto& lv = nav.path().back();
+    uint32_t total = 1;
+    for (const auto& b : lv.parentBlocks) total = std::max<uint32_t>(total, b.bar + b.bars);
+    const uint32_t fpb = se->framesPerBar();
+    for (const auto& o : lv.occurrences) total = std::max(total, o.parentBar + occurrence_bars(o, fpb));
+    lv_area_t a;
+    lv_obj_get_coords(s_mini, &a);
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    const MiniScale sc{lv_area_get_width(&a), total};
+    const int32_t px = p.x - a.x1;
+    for (size_t i = 0; i < lv.occurrences.size(); ++i) {
+        const auto& o = lv.occurrences[i];
+        if (px < sc.x(o.parentBar) - kMiniTapSlackPx || px > sc.x(o.parentBar + occurrence_bars(o, fpb)) + kMiniTapSlackPx) continue;
+        if (!nav.chooseOccurrence(i)) { note(nav.lastError().c_str()); return; }
+        if (fpb) crosspad::songTransport().setStartBar(o.offset / fpb);
+        return;
+    }
+}
+
+/// What the strip shows: the level's blocks, its passes, the chosen one, SOLO and the
+/// context's state -- anything else moving leaves it as drawn.
+uint32_t mini_key(const crosspad::ElementNav::Level& lv, int depth, crosspad::ContextState st, int32_t w)
+{
+    uint32_t h = kHashSeed;
+    auto mix = [&h](uint64_t v) { h = (h ^ (uint32_t)v) * kHashPrime; h = (h ^ (uint32_t)(v >> 32)) * kHashPrime; };
+    mix((uint64_t)depth);
+    mix(lv.chosen);
+    mix((uint64_t)st);
+    mix(s_solo);
+    mix((uint64_t)w);
+    for (const auto& b : lv.parentBlocks) {
+        mix(b.track);
+        mix(b.bar);
+        mix(b.bars);
+        mix((uint64_t)b.focus | (uint64_t)b.ready << 1 | (uint64_t)b.seq << 2);
+    }
+    for (const auto& o : lv.occurrences) {
+        mix(o.parentBar);
+        mix(o.frames);
+    }
+    return h;
+}
+
+void draw_mini(lv_obj_t* parent, const crosspad::ElementNav::Level& lv, uint32_t fpb)
+{
+    uint32_t total = 1;
+    for (const auto& b : lv.parentBlocks) total = std::max<uint32_t>(total, b.bar + b.bars);
+    for (const auto& o : lv.occurrences) total = std::max(total, o.parentBar + occurrence_bars(o, fpb));
+    const MiniScale sc{lv_obj_get_width(parent), total};
+    constexpr int32_t kBand = (kRulerH - kMiniFocusH) / kTracks;      // the blocks of a track: its own line
+    auto rect = [parent](int32_t x, int32_t y, int32_t w, int32_t h, lv_color_t c, lv_opa_t opa) {
+        lv_obj_t* o = lv_obj_create(parent);
+        lv_obj_remove_style_all(o);
+        lv_obj_set_pos(o, x, y);
+        lv_obj_set_size(o, std::max<int32_t>(1, w), h);
+        lv_obj_set_style_bg_color(o, c, 0);
+        lv_obj_set_style_bg_opa(o, opa, 0);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+        return o;
+    };
+    /* The parent as it is heard around the element: SOLO dims everything that is not the focus. */
+    const lv_opa_t aside = s_solo ? LV_OPA_20 : LV_OPA_COVER;
+    for (const auto& b : lv.parentBlocks) {
+        if (b.focus) continue;
+        rect(sc.x(b.bar), kMiniFocusH + b.track * kBand, sc.x(b.bar + b.bars) - sc.x(b.bar), kBand, b.ready ? kIce : kMissing, aside);
+    }
+    for (const auto& b : lv.parentBlocks)
+        if (b.focus) rect(sc.x(b.bar), 0, sc.x(b.bar + b.bars) - sc.x(b.bar), kMiniFocusH, kFocus, LV_OPA_COVER);
+    if (lv.chosen < lv.occurrences.size()) {
+        const auto& o = lv.occurrences[lv.chosen];
+        lv_obj_t* ring = rect(sc.x(o.parentBar), 0, sc.x(o.parentBar + occurrence_bars(o, fpb)) - sc.x(o.parentBar), kRulerH, kHead, LV_OPA_TRANSP);
+        lv_obj_set_style_border_color(ring, kHead, 0);
+        lv_obj_set_style_border_width(ring, kMiniOutlineW, 0);
+    }
+    s_miniProgress = rect(0, kRulerH - kMiniProgressH, 0, kMiniProgressH, kAudioT, LV_OPA_COVER);
+}
+
+} // namespace
+
+void elements_build_solo(lv_obj_t* heads)
+{
+    s_soloKey = make_button(heads, kHeadW, "S  SOLO", solo_cb);
+    lv_obj_set_height(s_soloKey, kSoloH);
+    lv_obj_set_pos(s_soloKey, 0, 0);
+    lv_obj_add_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+    style_toggle(s_soloKey, false, kKitT);
+    s_solo = false;
+    s_soloDepth = -1;
+}
+
+void elements_build_minimap(lv_obj_t* parent)
+{
+    s_mini = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_mini);
+    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_mini, kPanel, 0);
+    lv_obj_set_style_bg_opa(s_mini, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(s_mini, mini_cb, LV_EVENT_CLICKED, nullptr);
+    s_miniKey = 0;
+}
+
+/// Run by the screen's timer: SOLO off on any change of level, the strip over
+/// the ruler redrawn when what it shows changed, the context's bake along it,
+/// a context that could not be made said once.
+static void mini_tick(crosspad::ISongEngine* se)
+{
+    auto& nav = crosspad::elementNav();
+    const int depth = nav.depth();
+    if (depth != s_soloDepth) {
+        s_soloDepth = depth;
+        s_solo = false;
+        se->contextSolo(false);
+        s_miniKey = 0;
+        style_toggle(s_soloKey, false, kKitT);
+    }
+    const bool inside = depth > 0;
+    if (s_soloKey) {
+        if (inside) lv_obj_remove_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!s_mini || !s_timeline) return;
+    if (!inside) {
+        if (!lv_obj_has_flag(s_mini, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clean(s_mini);
+            s_miniProgress = nullptr;
+        }
+        s_miniKey = 0;
+        s_ctxState = crosspad::ContextState::None;
+        return;
+    }
+    const auto st = se->contextState();
+    if (st != s_ctxState) {
+        if (st == crosspad::ContextState::Incomplete)
+            ui_toast_show(se->contextWhy().c_str(), kToastMs, UI_TOAST_ERROR);
+        s_ctxState = st;
+    }
+    lv_area_t t, r;
+    lv_obj_get_coords(s_timeline, &t);
+    lv_obj_get_coords(s_root, &r);
+    const int32_t w = lv_area_get_width(&t);
+    const auto& lv = nav.path().back();
+    const uint32_t key = mini_key(lv, depth, st, w);
+    if (key != s_miniKey) {
+        s_miniKey = key;
+        lv_obj_set_pos(s_mini, t.x1 - r.x1, t.y1 - r.y1 + kMiniTimelinePad);
+        lv_obj_set_size(s_mini, w, kRulerH);
+        lv_obj_clean(s_mini);
+        draw_mini(s_mini, lv, se->framesPerBar());
+        lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_miniProgress) {
+        if (st == crosspad::ContextState::Baking) {
+            lv_obj_remove_flag(s_miniProgress, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_width(s_miniProgress, std::max<int32_t>(1, w * se->backgroundProgress() / 100));
+        } else {
+            lv_obj_add_flag(s_miniProgress, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 #ifdef ARR_USE_ENCODER
 void elements_group_add(lv_group_t* g)
 {
+    if (s_soloKey) lv_group_add_obj(g, s_soloKey);
     if (s_crumbRow) {
         for (uint32_t i = 0; i < lv_obj_get_child_count(s_crumbRow); ++i) {
             lv_obj_t* c = lv_obj_get_child(s_crumbRow, (int32_t)i);
@@ -464,6 +680,7 @@ void elements_tick(crosspad::ISongEngine* se)
     }
     watch_bakes(se);
     ask_library(se);
+    mini_tick(se);
 }
 
 bool elements_back()
@@ -703,7 +920,9 @@ void elements_destroy()
 {
     /* The widgets go with the screen's root; the job does not -- it is the
      * engine's, and the timer picks it up when the screen is back. */
-    s_crumbRow = s_moreKey = s_shield = nullptr;
+    s_crumbRow = s_moreKey = s_shield = s_soloKey = s_mini = s_miniProgress = nullptr;
+    s_miniKey = 0;
+    s_ctxState = crosspad::ContextState::None;
     s_crumbKey = kCrumbKeyNone;
     s_busy = false;
     s_libraryAsked = false;
