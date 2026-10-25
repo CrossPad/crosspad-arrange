@@ -34,6 +34,7 @@ constexpr int32_t     kHatchPitch     = 4;
 constexpr int32_t     kHatchLineW     = 1;
 constexpr char        kUntitled[]     = "ELEMENT";   ///< a block whose element is not named (yet)
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
+constexpr size_t      kReportLinesShown = 6;    ///< a refused delete names its users, this many lines
 constexpr int32_t     kSoloH          = kRulerH + 3;   ///< the SOLO key: the free cell above the heads, less a pixel under it
 constexpr int32_t     kMiniTapSlackPx = 6;      ///< a finger on the strip this close to a pass is on it
 constexpr int32_t     kMiniOutlineW   = 1;
@@ -42,6 +43,13 @@ constexpr int32_t     kMiniProgressH  = 2;      ///< the context's bake, along t
 constexpr int32_t     kMiniTimelinePad = 2;     ///< the timeline's own top padding, where the ruler begins
 constexpr uint32_t    kHashSeed       = 2166136261u;    ///< FNV-1a
 constexpr uint32_t    kHashPrime      = 16777619u;
+
+/// Which of ElementNav's questions the overlay in s_overlay is (the window is
+/// the screen's, the question the engine's: it is put up again whenever the
+/// question is waiting and nothing shows it).
+enum class Ask : uint8_t { None, Question, Draft };
+Ask         s_ask = Ask::None;
+std::string s_deleteRef;                      ///< the element a long press in the picker offered to delete
 
 lv_obj_t* s_crumbRow = nullptr;
 lv_obj_t* s_moreKey  = nullptr;
@@ -354,7 +362,161 @@ void select_returned()
     s_returnTrack = -1;
 }
 
+
+// ── the question a leave asks, and the unfinished edit ─────────────────────
+
+/// A line of small text in the overlay, as wide as it.
+void overlay_note(const char* text)
+{
+    lv_obj_t* l = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(l, kDim, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_text(l, text);
+}
+
+void answer_cb(lv_event_t* e)
+{
+    const auto c = (crosspad::ElementNav::Choice)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (!nav.choose(c)) note(nav.lastError().c_str());
+}
+
+void draft_cb(lv_event_t* e)
+{
+    const bool keep = lv_event_get_user_data(e) != nullptr;
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (!nav.resolveDraft(keep)) note(nav.lastError().c_str());
+}
+
+/// "REFREN is used in 3 other places": the leave waits for Make a copy or
+/// Replace everywhere. The power button calls the leave off (elements_ask_back()).
+void show_question()
+{
+    const auto& q = crosspad::elementNav().question();
+    close_overlay();
+    char head[96];
+    std::snprintf(head, sizeof(head), "%s is used in %u other place%s", q.title.empty() ? kUntitled : q.title.c_str(),
+                  (unsigned)q.uses, q.uses == 1 ? "" : "s");
+    overlay_keys(head);
+    std::string copies = "Copy makes: ";
+    for (size_t i = 0; i < q.copies.size(); ++i) copies += (i ? ", " : "") + q.copies[i];
+    overlay_note(copies.c_str());
+    overlay_note("Replace everywhere: they all get this edit. Power button: stay in the element.");
+    lv_obj_t* copy = overlay_key("Make a copy", answer_cb, (void*)(intptr_t)crosspad::ElementNav::Choice::Copy);
+    overlay_key("Replace everywhere", answer_cb, (void*)(intptr_t)crosspad::ElementNav::Choice::Replace);
+    s_ask = Ask::Question;
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(copy);
+#else
+    (void)copy;
+#endif
+}
+
+/// An edit a power cut ended: kept, or the element put back as it was.
+void show_draft()
+{
+    const auto& lv = crosspad::elementNav().path().back();
+    const std::string head = "Unfinished edit of " + level_title(lv);
+    close_overlay();
+    overlay_keys(head.c_str());
+    overlay_note("Continue keeps the edit. Restore puts the element back as it was before it.");
+    lv_obj_t* keep = overlay_key("Continue", draft_cb, (void*)(intptr_t)1);
+    overlay_key("Restore", draft_cb, nullptr);
+    s_ask = Ask::Draft;
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(keep);
+#else
+    (void)keep;
+#endif
+}
+
+/// What ElementNav waits for, shown: also when Arrange was closed meanwhile and
+/// is opened again -- the job stays busy until it is answered.
+void ask_tick()
+{
+    auto& nav = crosspad::elementNav();
+    const Ask want = nav.asking() ? Ask::Question : nav.draftWaiting() ? Ask::Draft : Ask::None;
+    if (want == s_ask && (want == Ask::None || s_overlay)) return;
+    if (want == Ask::None) { close_overlay(); return; }
+    if (want == Ask::Question) show_question();
+    else                       show_draft();
+}
+
+// ── deleting an element in the library ─────────────────────────────────────
+
+void element_delete_cb(lv_event_t*)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    if (!se->requestDeleteElement(s_deleteRef)) { note("Not deleted: a song is playing, or the card is busy."); return; }
+    s_editing = true;
+    s_editKind = EditKind::ElementDelete;
+    note("Deleting ...");
+}
+
+/// A long press on an element of the picker: asked once more, "Keep it" first.
+void library_hold_cb(lv_event_t* e)
+{
+    const size_t i = (size_t)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    if (i >= s_library.size()) return;
+    s_deleteRef = s_library[i].ref;
+    const std::string head = std::string("Delete ") + element_title(s_deleteRef) + "?";
+    overlay_keys(head.c_str());
+    overlay_note("It goes from the card with its bakes. One that a song or another element plays is refused, and the refusal names them.");
+    lv_obj_t* keep = overlay_key("Keep it", cancel_cb);
+    lv_obj_t* del = overlay_key(LV_SYMBOL_TRASH " Delete", element_delete_cb);
+    lv_obj_set_style_bg_color(del, kMute, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(del, 0), kInk, 0);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(keep);
+#else
+    (void)keep;
+#endif
+}
+
 } // namespace
+
+void elements_overlay_closed()
+{
+    s_ask = Ask::None;
+}
+
+bool elements_ask_back()
+{
+    if (s_ask == Ask::None) return false;
+    /* The question is called off and the user stays in the element; the unfinished
+     * edit has no such way out, it is answered with a key. */
+    if (s_ask == Ask::Question) {
+        crosspad::elementNav().choose(crosspad::ElementNav::Choice::None);
+        close_overlay();
+    }
+    return true;
+}
+
+void element_delete_done(bool ok)
+{
+    s_libraryWanted = true;
+    s_libraryKnown = false;
+    if (ok) { note("Element deleted."); return; }
+    auto* se = engine();
+    const std::vector<std::string> report = se ? se->editReport() : std::vector<std::string>{};
+    if (s_overlay) { note(report.empty() ? "Not deleted." : report[0].c_str()); return; }
+    overlay_list("Not deleted");
+    for (size_t i = 0; i < report.size() && i < kReportLinesShown; ++i) overlay_note(report[i].c_str());
+    if (report.empty()) overlay_note("No card, or the card kept some of its files.");
+    lv_obj_t* done = overlay_item(LV_SYMBOL_OK " OK", cancel_cb, nullptr, true);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(done);
+#else
+    (void)done;
+#endif
+}
 
 const char* element_title(const std::string& ref)
 {
@@ -656,6 +818,7 @@ void elements_tick(crosspad::ISongEngine* se)
     auto& nav = crosspad::elementNav();
     const auto r = nav.poll();
     set_busy(nav.busy());
+    ask_tick();
     /* The job waits for a stopped song (a leave while it plays, fitting copies
      * of stretched audio), and the top bar's PLAY is outside the shield. */
     if (nav.busy() && se->playing()) se->stop();
@@ -835,6 +998,7 @@ static void render_picker(size_t from)
         lv_obj_set_style_text_color(l, kDim, 0);
         lv_label_set_text(l, "No elements yet -- EDIT > New element here.");
     }
+    if (!s_library.empty() && from == 0) overlay_note("Hold an element to delete it.");
     bool songsHeaded = false;
     for (size_t k = from; k < to; ++k) {
         if (rows[k].song && !songsHeaded) {
@@ -847,7 +1011,8 @@ static void render_picker(size_t from)
             char row[64];
             lv_snprintf(row, sizeof(row), "%s  (%u bars)", element_title(s_library[rows[k].index].ref),
                         (unsigned)s_library[rows[k].index].bars);
-            overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
+            lv_obj_t* b = overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
+            lv_obj_add_event_cb(b, library_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)rows[k].index);
         } else {
             overlay_item(songs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
         }
@@ -903,7 +1068,7 @@ void element_region_cb(lv_event_t*)
 bool element_progress(char* buf, size_t cap)
 {
     auto& nav = crosspad::elementNav();
-    if (!nav.busy()) return false;
+    if (!nav.busy() || nav.asking()) return false;     // asking: the question is on the screen
     char stage[16];
     std::snprintf(stage, sizeof(stage), "%s", nav.stage()[0] ? nav.stage() : "working");
     upper(stage);
@@ -925,6 +1090,7 @@ void elements_destroy()
     s_ctxState = crosspad::ContextState::None;
     s_crumbKey = kCrumbKeyNone;
     s_busy = false;
+    s_ask = Ask::None;
     s_libraryAsked = false;
 #ifdef ARR_USE_ENCODER
     if (s_busyGroup) { lv_group_delete(s_busyGroup); s_busyGroup = nullptr; }

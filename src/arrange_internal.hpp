@@ -206,7 +206,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 enum class Pending : uint8_t { None, Projects, Clips, Elements, Songs };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
-enum class EditKind : uint8_t { Tempo, Rename, Delete, Export };
+enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ElementDelete };
 
 /* MOVE's axis while it is turned: first click along the bars, second across
  * the tracks, third done. Arrows beside the block show which, and a finger
@@ -394,6 +394,13 @@ void elements_group_add(lv_group_t* g);
 #endif
 void elements_tick(crosspad::ISongEngine* se);
 bool elements_back();
+/// The power click, with a question of ElementNav's on the screen: a leave's is
+/// called off (the user stays inside), an unfinished edit's is left to its keys.
+bool elements_ask_back();
+/// An overlay was closed: it was not the question any more.
+void elements_overlay_closed();
+/// The delete of an element ended: the library is read again, a refusal names its users.
+void element_delete_done(bool ok);
 bool elements_clip_edit();
 /// Draws an element block against its bake; fills @p b's state and progress bar.
 void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c, Block& b);

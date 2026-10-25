@@ -335,6 +335,7 @@ static void leave_region_edit();
 /// (elements_back()); while that is being baked, a click is spent on waiting.
 bool back_handler(lv_obj_t*)
 {
+    if (elements_ask_back()) return true;
     if (crosspad::elementNav().busy()) return true;
     if (s_overlay) {
         for (auto& t : s_mergeToggles) t = nullptr;
