@@ -32,6 +32,7 @@ constexpr int32_t     kBakeBarH       = 3;      ///< the progress bar along an e
 constexpr int32_t     kHatchH         = 5;      ///< a stale block's hatched edge
 constexpr int32_t     kHatchPitch     = 4;
 constexpr int32_t     kHatchLineW     = 1;
+constexpr char        kUntitled[]     = "ELEMENT";   ///< a block whose element is not named (yet)
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
 
 lv_obj_t* s_crumbRow = nullptr;
@@ -56,6 +57,7 @@ uint32_t s_returnBar   = 0;
 int      s_laidTrack = -1;
 uint32_t s_laidBar   = 0;
 size_t   s_laidBefore = 0;
+int      s_laidDepth  = 0;      ///< where the job was started: inside an element it is not 0
 
 bool       s_busy = false;                 ///< the shield and the empty encoder group are up
 lv_obj_t*  s_shield = nullptr;
@@ -191,6 +193,12 @@ void ask_library(crosspad::ISongEngine* se)
     s_libraryAsked = se->requestElements();
 }
 
+/// "ELEMENT n" for the one about to be made: the next number the library has not used.
+std::string next_title()
+{
+    return "ELEMENT " + std::to_string(s_library.size() + 1);
+}
+
 /// Element blocks on @p track, or on every track when it is -1.
 size_t element_blocks(const crosspad::AudioSong& song, int track)
 {
@@ -207,17 +215,18 @@ void expect_block(crosspad::ISongEngine* se, int track, uint32_t bar)
 {
     s_laidTrack = track;
     s_laidBar = bar;
+    s_laidDepth = crosspad::elementNav().depth();
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     s_laidBefore = element_blocks(se->song(), track);
 }
 
-/// A job that failed left its block on a track: the engine is inside the
-/// element (the block was laid before it was entered), or the song holds one
-/// more block at that bar than it did. An insert that failed at the copy, and
-/// a make that was refused, laid none.
+/// A job that failed left its block on a track: the engine is a level deeper
+/// than where the job started (the block was laid before it was entered), or
+/// the song holds one more block at that bar than it did. An insert that
+/// failed at the copy, and a make that was refused, laid none.
 bool block_was_laid(crosspad::ISongEngine* se)
 {
-    if (crosspad::elementNav().depth() > 0) return true;
+    if (crosspad::elementNav().depth() > s_laidDepth) return true;
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     return element_blocks(se->song(), s_laidTrack) > s_laidBefore;
 }
@@ -338,8 +347,7 @@ const char* element_title(const std::string& ref)
     /* Asked for once a change: an element the list does not hold (or holds
      * unnamed) is not asked for again each time the timeline is drawn. */
     if (!e && !s_libraryKnown) s_libraryWanted = true;
-    const size_t skip = ref.rfind('/');
-    return ref.c_str() + (skip == std::string::npos ? 0 : skip + 1);
+    return kUntitled;
 }
 
 void elements_build_crumbs(lv_obj_t* parent)
@@ -561,10 +569,8 @@ void element_new_cb(lv_event_t*)
         track = free_track(se->song(), bar, crosspad::ElementNav::kNewElementBars);
     }
     if (track < 0) { note("No audio track is free there."); return; }
-    char title[32];
-    std::snprintf(title, sizeof(title), "ELEMENT %u", (unsigned)s_library.size() + 1);
     expect_block(se, track, bar);
-    if (!nav.insertNew(track, bar, title)) note(nav.lastError().c_str());
+    if (!nav.insertNew(track, bar, next_title())) note(nav.lastError().c_str());
 }
 
 void element_library_cb(lv_event_t*)
@@ -573,48 +579,91 @@ void element_library_cb(lv_event_t*)
     request_list(Pending::Elements, "Element from library");
 }
 
+/// One row of the picker: an element of the library or a song to copy into it.
+struct PickRow { bool song; size_t index; };
+
+static bool s_songsBusy = false;       ///< the card would not list the songs
+
+static void render_picker(size_t from);
+
+static void picker_page_cb(lv_event_t* e)
+{
+    const size_t from = (size_t)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    overlay_list("Element from library");
+    render_picker(from);
+}
+
+/// The library, then the songs (the root left out), kLibraryRows rows of
+/// objects from @p from on: the rest is a "More..." away, the ones before a
+/// "Back..." -- a card with 50 songs does not build 50 buttons.
+static void render_picker(size_t from)
+{
+    auto* se = engine();
+    if (!se || !s_overlay) return;
+    const std::string root = crosspad::elementNav().path().front().open;
+    const auto songs = se->projects();
+    std::vector<PickRow> rows;
+    for (size_t i = 0; i < s_library.size(); ++i) rows.push_back({false, i});
+    if (!s_songsBusy)
+        for (size_t i = 0; i < songs.size(); ++i)
+            if (songs[i] != root) rows.push_back({true, i});
+    if (from >= rows.size()) from = 0;
+    const size_t to = std::min(rows.size(), from + (size_t)kLibraryRows);
+
+    if (from > 0) overlay_item(LV_SYMBOL_UP " Back...", picker_page_cb,
+                               (void*)(intptr_t)(from > (size_t)kLibraryRows ? from - kLibraryRows : 0));
+    if (s_library.empty() && from == 0) {
+        lv_obj_t* l = lv_label_create(s_overlay);
+        lv_obj_set_style_text_color(l, kDim, 0);
+        lv_label_set_text(l, "No elements yet -- EDIT > New element here.");
+    }
+    bool songsHeaded = false;
+    for (size_t k = from; k < to; ++k) {
+        if (rows[k].song && !songsHeaded) {
+            lv_obj_t* head = lv_label_create(s_overlay);
+            lv_obj_set_style_text_color(head, kDim, 0);
+            lv_label_set_text(head, "Songs");
+            songsHeaded = true;
+        }
+        if (!rows[k].song) {
+            char row[64];
+            lv_snprintf(row, sizeof(row), "%s  (%u bars)", element_title(s_library[rows[k].index].ref),
+                        (unsigned)s_library[rows[k].index].bars);
+            overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
+        } else {
+            overlay_item(songs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
+        }
+    }
+    if (to < rows.size()) overlay_item(LV_SYMBOL_DOWN " More...", picker_page_cb, (void*)(intptr_t)to);
+    if (s_songsBusy && to == rows.size()) {
+        lv_obj_t* l = lv_label_create(s_overlay);
+        lv_obj_set_style_text_color(l, kDim, 0);
+        lv_label_set_text(l, "Songs: card busy, try again");
+    }
+    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+}
+
 void fill_elements()
 {
     auto* se = engine();
     s_library = se->elements();
     s_libraryWanted = false;
     s_libraryKnown = true;
-    for (size_t i = 0; i < s_library.size() && i < (size_t)kLibraryRows; ++i) {
-        char row[64];
-        lv_snprintf(row, sizeof(row), "%s  (%u bars)", element_title(s_library[i].ref), (unsigned)s_library[i].bars);
-        overlay_item(row, library_pick_cb, (void*)(intptr_t)i);
-    }
-    if (s_library.empty()) {
-        lv_obj_t* l = lv_label_create(s_overlay);
-        lv_obj_set_style_text_color(l, kDim, 0);
-        lv_label_set_text(l, "No elements yet -- EDIT > New element here.");
-    }
-    /* Songs follow once the card has listed them: Cancel stays last. */
+    /* The songs are read next, so the pages are laid out once with both. */
     s_pendingGen = se->listGeneration();
-    if (se->requestProjects()) {
-        s_pending = Pending::Songs;
-        s_loading = lv_label_create(s_overlay);
-        lv_obj_set_style_text_color(s_loading, kDim, 0);
-        lv_label_set_text(s_loading, "Reading songs ...");
-        return;
-    }
-    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+    s_songsBusy = !se->requestProjects();
+    if (s_songsBusy) { render_picker(0); return; }
+    s_pending = Pending::Songs;
+    s_loading = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(s_loading, kDim, 0);
+    lv_label_set_text(s_loading, "Reading songs ...");
 }
 
 void fill_library_songs()
 {
-    auto* se = engine();
-    if (!se || !s_overlay) return;
-    /* The song the elements hang under, and with it every ancestor an element
-     * of it could be inserted into: a song cannot hold itself. */
-    const std::string root = crosspad::elementNav().path().front().open;
-    lv_obj_t* head = lv_label_create(s_overlay);
-    lv_obj_set_style_text_color(head, kDim, 0);
-    lv_label_set_text(head, "Songs");
-    const auto songs = se->projects();
-    for (size_t i = 0; i < songs.size() && i < (size_t)kLibraryRows; ++i)
-        if (songs[i] != root) overlay_item(songs[i].c_str(), song_pick_cb, (void*)(intptr_t)i);
-    overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
+    s_songsBusy = false;
+    render_picker(0);
 }
 
 void element_region_cb(lv_event_t*)
@@ -631,7 +680,7 @@ void element_region_cb(lv_event_t*)
         to = se->song().loopEnd;
     }
     expect_block(se, -1, from);
-    if (!nav.makeFromRegion(from, to)) note(nav.lastError().c_str());
+    if (!nav.makeFromRegion(from, to, next_title())) note(nav.lastError().c_str());
 }
 
 bool element_progress(char* buf, size_t cap)
