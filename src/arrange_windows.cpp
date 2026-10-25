@@ -22,8 +22,7 @@ void close_overlay()
     s_songList = nullptr;
     s_tempoItem = nullptr;
     s_trackNameArea = nullptr;
-    for (auto& d : s_mixDb) d = nullptr;
-    for (auto& m : s_mixMute) m = nullptr;
+    mix_forget();
 }
 
 /// A window over the timeline: full size, a column, the encoder its own.

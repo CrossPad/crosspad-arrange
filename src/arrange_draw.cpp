@@ -356,7 +356,7 @@ static void rebuild_group()
 }
 
 /// S or M on a header: lit in its colour, or dark.
-static void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
+void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
 {
     if (!b) return;
     set_bg(b, on ? col : kWell);

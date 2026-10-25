@@ -737,9 +737,32 @@ static void input_pick_cb(lv_event_t* e)
     }
 }
 
+/// MONITOR in the input sheet: the track's input heard live on the speakers
+/// and jacks, or not -- the Mixer's MONITOR at "all" or "off" for the
+/// input's channels (IInputMonitor), so the Mixer shows it and its desk keeps
+/// it. The sheet opens again with the new state.
+static void monitor_toggle_cb(lv_event_t*)
+{
+    auto* se = engine();
+    crosspad::IInputMonitor* mon = crosspad::getPlatformServices().inputMonitor;
+    close_overlay();
+    if (!se || !mon) return;
+    crosspad::RecInput in = crosspad::RecInput::Mic;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        in = se->song().tracks[s_selTrack].input;
+    }
+    const bool on = !mon->monitoring(in);
+    if (mon->setMonitoring(in, on)) {
+        note_fmt(on ? "%s monitored: heard on the speakers and jacks." : "%s not monitored.", input_name(in));
+    }
+    input_sheet(s_selTrack);
+}
+
 /// A long press on an audio track's header: which input REC records into it
 /// -- the mics, the line-in, both at once, what the computer plays over USB,
-/// or what the pads play -- and MIX, which the same press opens on the others.
+/// or what the pads play -- whether that input is heard live (MONITOR), and
+/// MIX, which the same press opens on the others.
 void input_sheet(int track)
 {
     auto* se = engine();
@@ -762,6 +785,12 @@ void input_sheet(int track)
         std::snprintf(text, sizeof(text), "%s %s%s", i.in == cur ? LV_SYMBOL_OK : "    ", i.name,
                       now ? "" : "  -  USB audio is off");
         overlay_item(text, input_pick_cb, (void*)(intptr_t)i.in);
+    }
+    crosspad::IInputMonitor* mon = crosspad::getPlatformServices().inputMonitor;
+    if (mon && mon->canMonitor(cur)) {
+        const bool on = mon->monitoring(cur);
+        overlay_item(on ? LV_SYMBOL_VOLUME_MAX " Monitor: ON" : LV_SYMBOL_MUTE " Monitor: OFF",
+                     monitor_toggle_cb, nullptr, on);
     }
     overlay_item(LV_SYMBOL_SETTINGS " MIX ...", [](lv_event_t* e) { close_overlay(); mix_cb(e); }, nullptr);
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);

@@ -211,7 +211,10 @@ void tick_cb(lv_timer_t*)
         s_peaksGen = se->peaksGeneration();
         take_peaks(se);
     }
-    if (s_overlay) return;
+    if (s_overlay) {
+        if (s_mixMeter[0][0]) mix_meters(se);
+        return;
+    }
     uint32_t shape = 0, total = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());

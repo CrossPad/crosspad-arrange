@@ -238,6 +238,11 @@ lv_obj_t* s_tempoItem = nullptr;
 lv_obj_t* s_songList = nullptr;     // a song window's list, under its header
 lv_obj_t* s_mixDb[kTracks] = {};
 lv_obj_t* s_mixMute[kTracks] = {};
+lv_obj_t* s_mixSolo[kTracks] = {};
+lv_obj_t* s_mixPan[kTracks] = {};          ///< the pan's reading: C, L25, R40; a tap centres it
+lv_obj_t* s_mixPanSlider[kTracks] = {};
+lv_obj_t* s_mixMeter[kTracks][2] = {};     ///< a bar a side beside the fader
+float     s_mixShown[kTracks][2] = {};
 
 #ifdef ARR_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
@@ -781,8 +786,7 @@ void Arrange_destroy(lv_obj_t* root)
     s_opening = false;
     s_lenLabel = nullptr;
     s_tempoItem = nullptr;
-    for (auto& d : s_mixDb) d = nullptr;
-    for (auto& m : s_mixMute) m = nullptr;
+    mix_forget();
     s_nameArea = nullptr;
     s_addRow = s_addInfo = nullptr;
     s_seqBlock = nullptr;

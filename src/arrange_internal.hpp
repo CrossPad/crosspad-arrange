@@ -15,6 +15,7 @@
 #include "crosspad-gui/components/transport_bar.h"
 #include "crosspad-gui/components/ui_toast.h"
 #include "crosspad/app/AppRegistrar.hpp"
+#include "crosspad/audio/IInputMonitor.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 /* A seq track names a sequencer scene: this screen reads its bars and notes
  * to draw the lane, and gives a new track a scene of its own. */
@@ -267,6 +268,11 @@ extern lv_obj_t* s_tempoItem;
 extern lv_obj_t* s_songList;
 extern lv_obj_t* s_mixDb[kTracks];
 extern lv_obj_t* s_mixMute[kTracks];
+extern lv_obj_t* s_mixSolo[kTracks];
+extern lv_obj_t* s_mixPan[kTracks];
+extern lv_obj_t* s_mixPanSlider[kTracks];
+extern lv_obj_t* s_mixMeter[kTracks][2];
+extern float     s_mixShown[kTracks][2];
 #ifdef ARR_USE_ENCODER
 extern lv_group_t* s_encGroup;
 extern lv_group_t* s_overlayGroup;
@@ -353,6 +359,9 @@ lv_obj_t* make_row(lv_obj_t* parent, int32_t h);
 void toggle_mute(int t);
 void toggle_solo(int t);
 void arm_track(int t);
+void mix_forget();
+void mix_meters(crosspad::ISongEngine* se);
+void style_toggle(lv_obj_t* b, bool on, lv_color_t col);
 void mix_cb(lv_event_t*);
 bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
 void sound_keeper_cb(lv_timer_t*);
