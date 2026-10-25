@@ -8,6 +8,10 @@
 
 #include "arrange_internal.hpp"
 
+#include "crosspad/event/IEventBus.hpp"
+
+#include <atomic>
+
 namespace arrange_ui {
 
 namespace {
@@ -34,6 +38,23 @@ constexpr int32_t     kHatchPitch     = 4;
 constexpr int32_t     kHatchLineW     = 1;
 constexpr char        kUntitled[]     = "ELEMENT";   ///< a block whose element is not named (yet)
 constexpr char        kCrumbKeyNone[] = "\x01";   ///< no crumbs drawn yet
+constexpr bool        kKeepEdit       = true;   ///< show_draft's Continue, as draft_cb reads it
+constexpr size_t      kReportLinesShown = 6;    ///< a refused delete names its users, this many lines
+constexpr int32_t     kSoloH          = kRulerH + 3;   ///< the SOLO key: the free cell above the heads, less a pixel under it
+constexpr int32_t     kMiniTapSlackPx = 6;      ///< a finger on the strip this close to a pass is on it
+constexpr int32_t     kMiniOutlineW   = 1;
+constexpr int32_t     kMiniFocusH     = 6;      ///< the focus's passes on the strip: the rest of the song is a line a track under them
+constexpr int32_t     kMiniProgressH  = 2;      ///< the context's bake, along the strip's bottom edge
+constexpr int32_t     kMiniTimelinePad = 2;     ///< the timeline's own top padding, where the ruler begins
+constexpr uint32_t    kHashSeed       = 2166136261u;    ///< FNV-1a
+constexpr uint32_t    kHashPrime      = 16777619u;
+
+/// Which of ElementNav's questions the overlay in s_overlay is (the window is
+/// the screen's, the question the engine's: it is put up again whenever the
+/// question is waiting and nothing shows it).
+enum class Ask : uint8_t { None, Question, Draft };
+Ask         s_ask = Ask::None;
+std::string s_deleteRef;                      ///< the element a long press in the picker offered to delete
 
 lv_obj_t* s_crumbRow = nullptr;
 lv_obj_t* s_moreKey  = nullptr;
@@ -42,10 +63,24 @@ std::string s_crumbKey = kCrumbKeyNone;       ///< what the row was last built f
 /// The element library as the engine last listed it: block and crumb titles,
 /// the next "ELEMENT n", the picker's rows.
 std::vector<crosspad::ElementInfo> s_library;
+/// The songs the picker drew, by name: a row picked is the song it showed,
+/// whatever the engine has listed since.
+std::vector<std::string> s_pickSongs;
 bool     s_libraryWanted = true;          ///< a title is not known: ask the engine for the list
 bool     s_libraryKnown  = false;         ///< the list came in since an element was last made or opened
 bool     s_libraryAsked  = false;
 uint32_t s_libraryGen    = 0;
+
+/// A "Rebake now" is an enter of the Stale block's element and, the moment that
+/// ends, its leave: the leave is what bakes (processing box and all).
+bool     s_rebaking = false;
+
+/// The last pad a finger played, in the clock's microseconds (from the bus), and
+/// what idleBaking() was last told: the call is made on a change only.
+std::atomic<int64_t>         s_lastPadUs{0};
+crosspad::SubscriptionHandle s_padSub = nullptr;
+bool                         s_idleSent = false;
+constexpr int64_t            kUsPerMs = 1000;
 
 /// Where the level being left sat in the song above, for the click that lands there.
 int      s_returnTrack = -1;
@@ -58,6 +93,14 @@ int      s_laidTrack = -1;
 uint32_t s_laidBar   = 0;
 size_t   s_laidBefore = 0;
 int      s_laidDepth  = 0;      ///< where the job was started: inside an element it is not 0
+
+lv_obj_t* s_soloKey = nullptr;                ///< SOLO, in the cell above the track heads
+lv_obj_t* s_mini = nullptr;                   ///< the level above in miniature, over the ruler
+lv_obj_t* s_miniProgress = nullptr;           ///< the context's bake along its edge
+uint32_t  s_miniKey = 0;                      ///< what the strip was last drawn from
+bool      s_solo = false;                     ///< the focus alone is heard
+int       s_soloDepth = -1;                   ///< the depth SOLO was last seen at
+crosspad::ContextState s_ctxState = crosspad::ContextState::None;   ///< as last seen, to toast an Incomplete once
 
 bool       s_busy = false;                 ///< the shield and the empty encoder group are up
 lv_obj_t*  s_shield = nullptr;
@@ -279,8 +322,8 @@ void song_pick_cb(lv_event_t* e)
     if (!se) return;
     auto& nav = crosspad::elementNav();
     if (nav.busy()) return;
-    const auto songs = se->projects();
-    if (i >= songs.size()) return;
+    if (i >= s_pickSongs.size()) return;
+    const std::string song = s_pickSongs[i];
     const uint32_t bar = playhead_bar();
     int track = -1;
     {
@@ -289,7 +332,7 @@ void song_pick_cb(lv_event_t* e)
     }
     if (track < 0) { note("No audio track is free there."); return; }
     expect_block(se, track, bar);
-    if (!nav.insertSong(track, bar, songs[i])) note(nav.lastError().c_str());
+    if (!nav.insertSong(track, bar, song)) note(nav.lastError().c_str());
 }
 
 // ── while a job runs ───────────────────────────────────────────────────────
@@ -338,7 +381,175 @@ void select_returned()
     s_returnTrack = -1;
 }
 
+
+// ── the question a leave asks, and the unfinished edit ─────────────────────
+
+/// A line of small text in the overlay, as wide as it.
+void overlay_note(const char* text)
+{
+    lv_obj_t* l = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(l, kDim, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_text(l, text);
+}
+
+void answer_cb(lv_event_t* e)
+{
+    const auto c = (crosspad::ElementNav::Choice)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (!nav.choose(c)) note(nav.lastError().c_str());
+}
+
+void draft_cb(lv_event_t* e)
+{
+    const bool keep = (bool)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (!nav.resolveDraft(keep)) note(nav.lastError().c_str());
+}
+
+/// "REFREN is used in 3 other places": the leave waits for Make a copy or
+/// Replace everywhere. The power button calls the leave off (elements_ask_back()).
+void show_question()
+{
+    const auto& q = crosspad::elementNav().question();
+    close_overlay();
+    char head[96];
+    std::snprintf(head, sizeof(head), "%s is used in %u other place%s", q.title.empty() ? kUntitled : q.title.c_str(),
+                  (unsigned)q.uses, q.uses == 1 ? "" : "s");
+    overlay_keys(head);
+    std::string copies = "Copy makes: ";
+    for (size_t i = 0; i < q.copies.size(); ++i) copies += (i ? ", " : "") + q.copies[i];
+    overlay_note(copies.c_str());
+    overlay_note("Replace everywhere: they all get this edit. Power button: stay in the element.");
+    lv_obj_t* copy = overlay_key("Make a copy", answer_cb, (void*)(intptr_t)crosspad::ElementNav::Choice::Copy);
+    overlay_key("Replace everywhere", answer_cb, (void*)(intptr_t)crosspad::ElementNav::Choice::Replace);
+    s_ask = Ask::Question;
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(copy);
+#else
+    (void)copy;
+#endif
+}
+
+/// An edit a power cut ended: kept, or the element put back as it was.
+void show_draft()
+{
+    const auto& lv = crosspad::elementNav().path().back();
+    const std::string head = "Unfinished edit of " + level_title(lv);
+    close_overlay();
+    overlay_keys(head.c_str());
+    overlay_note("Continue keeps the edit. Restore puts the element back as it was before it.");
+    lv_obj_t* keep = overlay_key("Continue", draft_cb, (void*)(intptr_t)kKeepEdit);
+    overlay_key("Restore", draft_cb, nullptr);
+    s_ask = Ask::Draft;
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(keep);
+#else
+    (void)keep;
+#endif
+}
+
+/// What ElementNav waits for, shown: also when Arrange was closed meanwhile and
+/// is opened again -- the job stays busy until it is answered.
+void ask_tick()
+{
+    auto& nav = crosspad::elementNav();
+    const Ask want = nav.asking() ? Ask::Question : nav.draftWaiting() ? Ask::Draft : Ask::None;
+    if (want == s_ask && (want == Ask::None || s_overlay)) return;
+    if (want == Ask::None) { close_overlay(); return; }
+    if (want == Ask::Question) show_question();
+    else                       show_draft();
+}
+
+// ── deleting an element in the library ─────────────────────────────────────
+
+void element_delete_cb(lv_event_t*)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    if (!se->requestDeleteElement(s_deleteRef)) {
+        note(se->playing() ? "Stop the song first." : "Not deleted: the card is busy.");
+        return;
+    }
+    s_editing = true;
+    s_editKind = EditKind::ElementDelete;
+    note("Deleting ...");
+}
+
+/// A long press on an element of the picker: asked once more, "Keep it" first.
+void library_hold_cb(lv_event_t* e)
+{
+    const size_t i = (size_t)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    if (i >= s_library.size()) return;
+    s_deleteRef = s_library[i].ref;
+    const std::string head = std::string("Delete ") + element_title(s_deleteRef) + "?";
+    overlay_keys(head.c_str());
+    overlay_note("It goes from the card with its bakes. One that a song or another element plays is refused, and the refusal names them.");
+    lv_obj_t* keep = overlay_key("Keep it", cancel_cb);
+    lv_obj_t* del = overlay_key(LV_SYMBOL_TRASH " Delete", element_delete_cb);
+    lv_obj_set_style_bg_color(del, kMute, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(del, 0), kInk, 0);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(keep);
+#else
+    (void)keep;
+#endif
+}
+
 } // namespace
+
+lv_group_t* elements_group_after_overlay(lv_group_t* base)
+{
+#ifdef ARR_USE_ENCODER
+    return s_busy && s_busyGroup ? s_busyGroup : base;
+#else
+    return base;
+#endif
+}
+
+void elements_overlay_closed()
+{
+    s_ask = Ask::None;
+}
+
+bool elements_ask_back()
+{
+    if (s_ask == Ask::None) return false;
+    /* The question is called off and the user stays in the element; the unfinished
+     * edit has no such way out, it is answered with a key. */
+    if (s_ask == Ask::Question) {
+        crosspad::elementNav().choose(crosspad::ElementNav::Choice::None);
+        close_overlay();
+    } else {
+        note("Answer the unfinished edit first.");
+    }
+    return true;
+}
+
+void element_delete_done(bool ok)
+{
+    s_libraryWanted = true;
+    s_libraryKnown = false;
+    if (ok) { note("Element deleted."); return; }
+    auto* se = engine();
+    const std::vector<std::string> report = se ? se->editReport() : std::vector<std::string>{};
+    if (s_overlay) { note(report.empty() ? "Not deleted." : report[0].c_str()); return; }
+    overlay_list("Not deleted");
+    for (size_t i = 0; i < report.size() && i < kReportLinesShown; ++i) overlay_note(report[i].c_str());
+    if (report.empty()) overlay_note("No card, or the card kept some of its files.");
+    lv_obj_t* done = overlay_item(LV_SYMBOL_OK " OK", cancel_cb, nullptr, true);
+#ifdef ARR_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(done);
+#else
+    (void)done;
+#endif
+}
 
 const char* element_title(const std::string& ref)
 {
@@ -404,9 +615,209 @@ void elements_refresh_crumbs()
     }
 }
 
+// ── the mini-map and SOLO ──────────────────────────────────────────────────
+
+namespace {
+
+void solo_cb(lv_event_t*)
+{
+    auto* se = engine();
+    if (!se || crosspad::elementNav().depth() == 0) return;
+    s_solo = !s_solo;
+    se->contextSolo(s_solo);
+    style_toggle(s_soloKey, s_solo, kKitT);
+}
+
+/// Where a bar of the level above falls on the strip.
+struct MiniScale {
+    int32_t  w = 0;
+    uint32_t bars = 1;
+    int32_t x(uint32_t bar) const { return (int32_t)((uint64_t)bar * (uint32_t)w / bars); }
+};
+
+/// How many bars of the level above an occurrence sounds for, at least one.
+uint32_t occurrence_bars(const crosspad::ElementNav::Occurrence& o, uint32_t framesPerBar)
+{
+    if (!framesPerBar) return 1;
+    return std::max<uint32_t>(1, (o.frames + framesPerBar - 1) / framesPerBar);
+}
+
+/// A tap on the strip: the pass under the finger (a few pixels either side of it), chosen,
+/// with the playhead at where in the element it begins.
+void mini_cb(lv_event_t*)
+{
+    auto* se = engine();
+    auto& nav = crosspad::elementNav();
+    lv_indev_t* in = lv_indev_active();
+    if (!se || !in || !s_mini || nav.depth() == 0 || nav.busy()) return;
+    const auto& lv = nav.path().back();
+    uint32_t total = 1;
+    for (const auto& b : lv.parentBlocks) total = std::max<uint32_t>(total, b.bar + b.bars);
+    const uint32_t fpb = se->framesPerBar();
+    for (const auto& o : lv.occurrences) total = std::max(total, o.parentBar + occurrence_bars(o, fpb));
+    lv_area_t a;
+    lv_obj_get_coords(s_mini, &a);
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    const MiniScale sc{lv_area_get_width(&a), total};
+    const int32_t px = p.x - a.x1;
+    for (size_t i = 0; i < lv.occurrences.size(); ++i) {
+        const auto& o = lv.occurrences[i];
+        if (px < sc.x(o.parentBar) - kMiniTapSlackPx || px > sc.x(o.parentBar + occurrence_bars(o, fpb)) + kMiniTapSlackPx) continue;
+        if (!nav.chooseOccurrence(i)) { note(nav.lastError().c_str()); return; }
+        if (fpb) crosspad::songTransport().setStartBar(o.offset / fpb);
+        return;
+    }
+}
+
+/// What the strip shows: the level's blocks, its passes, the chosen one, SOLO and the
+/// context's state -- anything else moving leaves it as drawn.
+uint32_t mini_key(const crosspad::ElementNav::Level& lv, int depth, crosspad::ContextState st, int32_t w)
+{
+    uint32_t h = kHashSeed;
+    auto mix = [&h](uint64_t v) { h = (h ^ (uint32_t)v) * kHashPrime; h = (h ^ (uint32_t)(v >> 32)) * kHashPrime; };
+    mix((uint64_t)depth);
+    mix(lv.chosen);
+    mix((uint64_t)st);
+    mix(s_solo);
+    mix((uint64_t)w);
+    for (const auto& b : lv.parentBlocks) {
+        mix(b.track);
+        mix(b.bar);
+        mix(b.bars);
+        mix((uint64_t)b.focus | (uint64_t)b.ready << 1 | (uint64_t)b.seq << 2);
+    }
+    for (const auto& o : lv.occurrences) {
+        mix(o.parentBar);
+        mix(o.frames);
+    }
+    return h;
+}
+
+void draw_mini(lv_obj_t* parent, const crosspad::ElementNav::Level& lv, uint32_t fpb)
+{
+    uint32_t total = 1;
+    for (const auto& b : lv.parentBlocks) total = std::max<uint32_t>(total, b.bar + b.bars);
+    for (const auto& o : lv.occurrences) total = std::max(total, o.parentBar + occurrence_bars(o, fpb));
+    const MiniScale sc{lv_obj_get_width(parent), total};
+    constexpr int32_t kBand = (kRulerH - kMiniFocusH) / kTracks;      // the blocks of a track: its own line
+    auto rect = [parent](int32_t x, int32_t y, int32_t w, int32_t h, lv_color_t c, lv_opa_t opa) {
+        lv_obj_t* o = lv_obj_create(parent);
+        lv_obj_remove_style_all(o);
+        lv_obj_set_pos(o, x, y);
+        lv_obj_set_size(o, std::max<int32_t>(1, w), h);
+        lv_obj_set_style_bg_color(o, c, 0);
+        lv_obj_set_style_bg_opa(o, opa, 0);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+        return o;
+    };
+    /* The parent as it is heard around the element: SOLO dims everything that is not the focus. */
+    const lv_opa_t aside = s_solo ? LV_OPA_20 : LV_OPA_COVER;
+    for (const auto& b : lv.parentBlocks) {
+        if (b.focus) continue;
+        rect(sc.x(b.bar), kMiniFocusH + b.track * kBand, sc.x(b.bar + b.bars) - sc.x(b.bar), kBand, b.ready ? kIce : kMissing, aside);
+    }
+    for (const auto& b : lv.parentBlocks)
+        if (b.focus) rect(sc.x(b.bar), 0, sc.x(b.bar + b.bars) - sc.x(b.bar), kMiniFocusH, kFocus, LV_OPA_COVER);
+    if (lv.chosen < lv.occurrences.size()) {
+        const auto& o = lv.occurrences[lv.chosen];
+        lv_obj_t* ring = rect(sc.x(o.parentBar), 0, sc.x(o.parentBar + occurrence_bars(o, fpb)) - sc.x(o.parentBar), kRulerH, kHead, LV_OPA_TRANSP);
+        lv_obj_set_style_border_color(ring, kHead, 0);
+        lv_obj_set_style_border_width(ring, kMiniOutlineW, 0);
+    }
+    s_miniProgress = rect(0, kRulerH - kMiniProgressH, 0, kMiniProgressH, kAudioT, LV_OPA_COVER);
+}
+
+} // namespace
+
+void elements_build_solo(lv_obj_t* heads)
+{
+    s_soloKey = make_button(heads, kHeadW, "S  SOLO", solo_cb);
+    lv_obj_set_height(s_soloKey, kSoloH);
+    lv_obj_set_pos(s_soloKey, 0, 0);
+    lv_obj_add_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+    style_toggle(s_soloKey, false, kKitT);
+    s_solo = false;
+    s_soloDepth = -1;
+}
+
+void elements_build_minimap(lv_obj_t* parent)
+{
+    s_mini = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_mini);
+    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_mini, kPanel, 0);
+    lv_obj_set_style_bg_opa(s_mini, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(s_mini, mini_cb, LV_EVENT_CLICKED, nullptr);
+    s_miniKey = 0;
+}
+
+/// Run by the screen's timer: SOLO off on any change of level, the strip over
+/// the ruler redrawn when what it shows changed, the context's bake along it,
+/// a context that could not be made said once.
+static void mini_tick(crosspad::ISongEngine* se)
+{
+    auto& nav = crosspad::elementNav();
+    const int depth = nav.depth();
+    if (depth != s_soloDepth) {
+        s_soloDepth = depth;
+        s_solo = false;
+        se->contextSolo(false);
+        s_miniKey = 0;
+        style_toggle(s_soloKey, false, kKitT);
+    }
+    const bool inside = depth > 0;
+    if (s_soloKey) {
+        if (inside) lv_obj_remove_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_soloKey, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!s_mini || !s_timeline) return;
+    if (!inside) {
+        if (!lv_obj_has_flag(s_mini, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clean(s_mini);
+            s_miniProgress = nullptr;
+        }
+        s_miniKey = 0;
+        s_ctxState = crosspad::ContextState::None;
+        return;
+    }
+    const auto st = se->contextState();
+    if (st != s_ctxState) {
+        if (st == crosspad::ContextState::Incomplete)
+            ui_toast_show(se->contextWhy().c_str(), kToastMs, UI_TOAST_ERROR);
+        s_ctxState = st;
+    }
+    lv_area_t t, r;
+    lv_obj_get_coords(s_timeline, &t);
+    lv_obj_get_coords(s_root, &r);
+    const int32_t w = lv_area_get_width(&t);
+    const auto& lv = nav.path().back();
+    const uint32_t key = mini_key(lv, depth, st, w);
+    if (key != s_miniKey) {
+        s_miniKey = key;
+        lv_obj_set_pos(s_mini, t.x1 - r.x1, t.y1 - r.y1 + kMiniTimelinePad);
+        lv_obj_set_size(s_mini, w, kRulerH);
+        lv_obj_clean(s_mini);
+        draw_mini(s_mini, lv, se->framesPerBar());
+        lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_miniProgress) {
+        if (st == crosspad::ContextState::Baking) {
+            lv_obj_remove_flag(s_miniProgress, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_width(s_miniProgress, std::max<int32_t>(1, w * se->backgroundProgress() / 100));
+        } else {
+            lv_obj_add_flag(s_miniProgress, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 #ifdef ARR_USE_ENCODER
 void elements_group_add(lv_group_t* g)
 {
+    if (s_soloKey) lv_group_add_obj(g, s_soloKey);
     if (s_crumbRow) {
         for (uint32_t i = 0; i < lv_obj_get_child_count(s_crumbRow); ++i) {
             lv_obj_t* c = lv_obj_get_child(s_crumbRow, (int32_t)i);
@@ -435,16 +846,50 @@ static void watch_bakes(crosspad::ISongEngine* se)
     if (moved) rebuild_timeline();
 }
 
+/// The player is away -- the song stopped, no element job running and no pad
+/// played for kIdleBakeMs (core's, the one its own docs name) -- so the engine
+/// may bake the other songs' blocks of an element changed since. The press
+/// time comes off the bus: PadManager keeps none.
+static void idle_tick(crosspad::ISongEngine* se)
+{
+    if (!s_padSub) {
+        s_lastPadUs.store(crosspad::getClock().getTimeUs());
+        s_padSub = crosspad::getEventBus().subscribe(crosspad::EventType::PadPressed,
+            [](const void*, crosspad::EventType, void*) {
+                s_lastPadUs.store(crosspad::getClock().getTimeUs());
+            });
+    }
+    const int64_t quietUs = crosspad::getClock().getTimeUs() - s_lastPadUs.load();
+    const bool away = !se->playing() && !crosspad::elementNav().busy()
+                      && quietUs >= (int64_t)crosspad::kIdleBakeMs * kUsPerMs;
+    if (away != s_idleSent) {
+        s_idleSent = away;
+        se->idleBaking(away);
+    }
+}
+
 void elements_tick(crosspad::ISongEngine* se)
 {
     auto& nav = crosspad::elementNav();
     const auto r = nav.poll();
     set_busy(nav.busy());
+    ask_tick();
     /* The job waits for a stopped song (a leave while it plays, fitting copies
      * of stretched audio), and the top bar's PLAY is outside the shield. */
     if (nav.busy() && se->playing()) se->stop();
+    if (r.done && s_rebaking) {
+        /* The enter of a "Rebake now" is only the way in: straight on out, no
+         * new level to settle into. The leave's own end is the job it reports. */
+        s_rebaking = false;
+        if (r.ok && r.job == crosspad::ElementNav::Job::Enter) {
+            leave_to(nav.depth() - 1);
+            return;
+        }
+    }
     if (r.done) {
-        if (!r.ok) {
+        if (r.calledOff) {
+            /* The user's own answer: nothing failed, nothing to say. */
+        } else if (!r.ok) {
             std::string msg = r.error.empty() ? nav.lastError() : r.error;
             /* A block is laid before its job bakes it: it stays, unbaked. A job that
              * failed before that left the song as it was. */
@@ -464,6 +909,8 @@ void elements_tick(crosspad::ISongEngine* se)
     }
     watch_bakes(se);
     ask_library(se);
+    mini_tick(se);
+    idle_tick(se);
 }
 
 bool elements_back()
@@ -556,6 +1003,14 @@ void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::Song
     }
 }
 
+void element_rebake_cb(lv_event_t*)
+{
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (nav.busy() || !elements_clip_edit()) return;
+    s_rebaking = nav.busy();
+}
+
 void element_new_cb(lv_event_t*)
 {
     auto* se = engine();
@@ -579,7 +1034,8 @@ void element_library_cb(lv_event_t*)
     request_list(Pending::Elements, "Element from library");
 }
 
-/// One row of the picker: an element of the library or a song to copy into it.
+/// One row of the picker: an element of the library or a song to copy into it
+/// (@c index into s_library or s_pickSongs).
 struct PickRow { bool song; size_t index; };
 
 static bool s_songsBusy = false;       ///< the card would not list the songs
@@ -605,9 +1061,13 @@ static void render_picker(size_t from)
     const auto songs = se->projects();
     std::vector<PickRow> rows;
     for (size_t i = 0; i < s_library.size(); ++i) rows.push_back({false, i});
+    s_pickSongs.clear();
     if (!s_songsBusy)
-        for (size_t i = 0; i < songs.size(); ++i)
-            if (songs[i] != root) rows.push_back({true, i});
+        for (const std::string& song : songs)
+            if (song != root) {
+                rows.push_back({true, s_pickSongs.size()});
+                s_pickSongs.push_back(song);
+            }
     if (from >= rows.size()) from = 0;
     const size_t to = std::min(rows.size(), from + (size_t)kLibraryRows);
 
@@ -618,6 +1078,7 @@ static void render_picker(size_t from)
         lv_obj_set_style_text_color(l, kDim, 0);
         lv_label_set_text(l, "No elements yet -- EDIT > New element here.");
     }
+    if (!s_library.empty() && from == 0) overlay_note("Hold an element to delete it.");
     bool songsHeaded = false;
     for (size_t k = from; k < to; ++k) {
         if (rows[k].song && !songsHeaded) {
@@ -630,9 +1091,10 @@ static void render_picker(size_t from)
             char row[64];
             lv_snprintf(row, sizeof(row), "%s  (%u bars)", element_title(s_library[rows[k].index].ref),
                         (unsigned)s_library[rows[k].index].bars);
-            overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
+            lv_obj_t* b = overlay_item(row, library_pick_cb, (void*)(intptr_t)rows[k].index);
+            lv_obj_add_event_cb(b, library_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)rows[k].index);
         } else {
-            overlay_item(songs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
+            overlay_item(s_pickSongs[rows[k].index].c_str(), song_pick_cb, (void*)(intptr_t)rows[k].index);
         }
     }
     if (to < rows.size()) overlay_item(LV_SYMBOL_DOWN " More...", picker_page_cb, (void*)(intptr_t)to);
@@ -686,7 +1148,7 @@ void element_region_cb(lv_event_t*)
 bool element_progress(char* buf, size_t cap)
 {
     auto& nav = crosspad::elementNav();
-    if (!nav.busy()) return false;
+    if (!nav.busy() || nav.asking()) return false;     // asking: the question is on the screen
     char stage[16];
     std::snprintf(stage, sizeof(stage), "%s", nav.stage()[0] ? nav.stage() : "working");
     upper(stage);
@@ -703,10 +1165,23 @@ void elements_destroy()
 {
     /* The widgets go with the screen's root; the job does not -- it is the
      * engine's, and the timer picks it up when the screen is back. */
-    s_crumbRow = s_moreKey = s_shield = nullptr;
+    s_crumbRow = s_moreKey = s_shield = s_soloKey = s_mini = s_miniProgress = nullptr;
+    s_miniKey = 0;
+    s_ctxState = crosspad::ContextState::None;
     s_crumbKey = kCrumbKeyNone;
     s_busy = false;
+    s_ask = Ask::None;
     s_libraryAsked = false;
+    /* The screen is the player's eyes on the pads and the clock: gone, there is
+     * no one to be away, and the engine is told so. */
+    if (s_padSub) {
+        crosspad::getEventBus().unsubscribe(s_padSub);
+        s_padSub = nullptr;
+    }
+    if (s_idleSent) {
+        s_idleSent = false;
+        if (auto* se = engine()) se->idleBaking(false);
+    }
 #ifdef ARR_USE_ENCODER
     if (s_busyGroup) { lv_group_delete(s_busyGroup); s_busyGroup = nullptr; }
 #endif

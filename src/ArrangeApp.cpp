@@ -457,6 +457,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_remove_style_all(heads);
     lv_obj_set_size(heads, kHeadW, LV_PCT(100));
     lv_obj_remove_flag(heads, LV_OBJ_FLAG_SCROLLABLE);
+    elements_build_solo(heads);
     for (int t = 0; t < kTracks; ++t) {
         lv_obj_t* h = lv_button_create(heads);
         lv_obj_set_pos(h, 0, kRulerH + 4 + t * (kLaneH + kLaneGap));
@@ -592,6 +593,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_pad_hor(s_timeline, 2, 0);
     lv_obj_set_scroll_dir(s_timeline, LV_DIR_HOR);
     lv_obj_set_scrollbar_mode(s_timeline, LV_SCROLLBAR_MODE_OFF);
+    elements_build_minimap(s_root);
 
     /* The tracks' stereo meters, beside the lanes: a well a track, two
      * columns of ten segments bottom up -- green, two amber, one red -- at a

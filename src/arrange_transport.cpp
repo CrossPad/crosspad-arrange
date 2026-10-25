@@ -201,6 +201,7 @@ void tick_cb(lv_timer_t*)
         rebuild_timeline();
         update_info();
         if (s_editKind == EditKind::Export) export_done(!failed);
+        else if (s_editKind == EditKind::ElementDelete) element_delete_done(!failed);
         else if (failed && s_editKind == EditKind::Rename) rename_failed();
         else if (failed && s_editKind == EditKind::Delete) {
             note( "Not deleted: no card, or the card kept some of its files.");

@@ -126,6 +126,7 @@ inline const lv_color_t kMute   = lv_color_hex(0xFF5C5C);
  * that looks like the others is read as one that plays. */
 inline const lv_color_t kMissing = lv_color_hex(0x6E757E);
 inline const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+inline const lv_color_t kFocus  = lv_color_hex(0xF0A23C);     // what plays live: the focus's blocks on the mini-map
 inline const lv_color_t kIce    = lv_color_hex(0x7FD4FF);     // a frozen track's name
 inline const lv_color_t kRec    = lv_color_hex(0xFF5C5C);     // the playhead while a take runs: REC's red
 inline const lv_color_t kTrack  = lv_color_hex(0x3A3F47);     // a fader's travel
@@ -205,7 +206,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 enum class Pending : uint8_t { None, Projects, Clips, Elements, Songs };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
-enum class EditKind : uint8_t { Tempo, Rename, Delete, Export };
+enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ElementDelete };
 
 /* MOVE's axis while it is turned: first click along the bars, second across
  * the tracks, third done. Arrows beside the block show which, and a finger
@@ -384,17 +385,32 @@ void request_list(Pending what, const char* title);
 // Elements (arrange_elements.cpp): arrangements inside the song, one level at a time.
 void elements_build_crumbs(lv_obj_t* parent);
 void elements_refresh_crumbs();
+/// SOLO of the focus, in the free cell above the track heads; the level above in
+/// miniature over the timeline's ruler.
+void elements_build_solo(lv_obj_t* heads);
+void elements_build_minimap(lv_obj_t* parent);
 #ifdef ARR_USE_ENCODER
 void elements_group_add(lv_group_t* g);
 #endif
 void elements_tick(crosspad::ISongEngine* se);
 bool elements_back();
+/// The power click, with a question of ElementNav's on the screen: a leave's is
+/// called off (the user stays inside), an unfinished edit's is left to its keys.
+bool elements_ask_back();
+/// An overlay was closed: it was not the question any more.
+void elements_overlay_closed();
+/// The encoder group to give back when an overlay closes: the job's empty one while it runs.
+lv_group_t* elements_group_after_overlay(lv_group_t* base);
+/// The delete of an element ended: the library is read again, a refusal names its users.
+void element_delete_done(bool ok);
 bool elements_clip_edit();
 /// Draws an element block against its bake; fills @p b's state and progress bar.
 void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c, Block& b);
 void elements_destroy();
 bool elements_list_pending();
 void element_new_cb(lv_event_t*);
+/// EDIT > Rebake now: the selected Stale element block is entered and left, which bakes it.
+void element_rebake_cb(lv_event_t*);
 void element_library_cb(lv_event_t*);
 void fill_elements();
 void fill_library_songs();
