@@ -494,9 +494,11 @@ void request_list(Pending what, const char* title)
     auto* se = engine();
     if (!se || s_overlay) return;
     s_pendingGen = se->listGeneration();
-    const bool asked = what == Pending::Projects ? se->requestProjects()
+    /* One generation counts every list the engine reads: an elements read still
+     * running would move it and fill this list from the old one. */
+    const bool asked = !elements_list_pending() && (what == Pending::Projects ? se->requestProjects()
                      : what == Pending::Clips  ? se->requestClips()
-                                               : se->requestElements();
+                                               : se->requestElements());
     const char* wait = asked ? "Reading the card ..." : "The card is busy, try again.";
     if (what == Pending::Projects) {
         song_window(title, cancel_cb, LV_SYMBOL_PLUS " NEW", new_song_cb);

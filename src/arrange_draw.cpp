@@ -320,12 +320,10 @@ static void rebuild_group()
     if (!s_encGroup) return;
     lv_obj_t* focused = lv_group_get_focused(s_encGroup);
     lv_group_remove_all_objs(s_encGroup);
-    lv_group_add_obj(s_encGroup, s_projBtn);
-    lv_group_add_obj(s_encGroup, s_followBtn);
-    lv_group_add_obj(s_encGroup, s_editBtn);
-    lv_group_add_obj(s_encGroup, s_syncBtn);
-    lv_group_add_obj(s_encGroup, s_loopBtn);
-    lv_group_add_obj(s_encGroup, s_zoomBtn);
+    /* The context row's keys the open element hides are not reachable: a hidden
+     * key left in the group could take the focus back and open the project list. */
+    for (lv_obj_t* k : {s_projBtn, s_followBtn, s_editBtn, s_syncBtn, s_loopBtn, s_zoomBtn})
+        if (k && !lv_obj_has_flag(k, LV_OBJ_FLAG_HIDDEN)) lv_group_add_obj(s_encGroup, k);
     elements_group_add(s_encGroup);
     for (int i = 0; i < s_blockCount; ++i) lv_group_add_obj(s_encGroup, s_blocks[i].obj);
     if (s_seqBlock) lv_group_add_obj(s_encGroup, s_seqBlock);

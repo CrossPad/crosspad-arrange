@@ -390,6 +390,7 @@ bool elements_back();
 bool elements_clip_edit();
 void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::SongClip& c);
 void elements_destroy();
+bool elements_list_pending();
 void element_new_cb(lv_event_t*);
 void element_library_cb(lv_event_t*);
 void fill_elements();

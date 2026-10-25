@@ -350,6 +350,9 @@ void elements_tick(crosspad::ISongEngine* se)
     auto& nav = crosspad::elementNav();
     const auto r = nav.poll();
     set_busy(nav.busy());
+    /* The job waits for a stopped song (a leave while it plays, fitting copies
+     * of stretched audio), and the top bar's PLAY is outside the shield. */
+    if (nav.busy() && se->playing()) se->stop();
     if (r.done) {
         if (!r.ok) {
             ui_toast_show(r.error.empty() ? nav.lastError().c_str() : r.error.c_str(), kToastMs, UI_TOAST_ERROR);
@@ -465,6 +468,11 @@ bool element_progress(char* buf, size_t cap)
     upper(stage);
     std::snprintf(buf, cap, "%s ELEMENT\n%u%%", stage, (unsigned)nav.progress());
     return true;
+}
+
+bool elements_list_pending()
+{
+    return s_libraryAsked;
 }
 
 void elements_destroy()
