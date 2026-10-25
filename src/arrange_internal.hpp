@@ -409,6 +409,8 @@ void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::Song
 void elements_destroy();
 bool elements_list_pending();
 void element_new_cb(lv_event_t*);
+/// EDIT > Rebake now: the selected Stale element block is entered and left, which bakes it.
+void element_rebake_cb(lv_event_t*);
 void element_library_cb(lv_event_t*);
 void fill_elements();
 void fill_library_songs();

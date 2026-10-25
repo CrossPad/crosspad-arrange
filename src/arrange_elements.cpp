@@ -8,6 +8,10 @@
 
 #include "arrange_internal.hpp"
 
+#include "crosspad/event/IEventBus.hpp"
+
+#include <atomic>
+
 namespace arrange_ui {
 
 namespace {
@@ -63,6 +67,17 @@ bool     s_libraryWanted = true;          ///< a title is not known: ask the eng
 bool     s_libraryKnown  = false;         ///< the list came in since an element was last made or opened
 bool     s_libraryAsked  = false;
 uint32_t s_libraryGen    = 0;
+
+/// A "Rebake now" is an enter of the Stale block's element and, the moment that
+/// ends, its leave: the leave is what bakes (processing box and all).
+bool     s_rebaking = false;
+
+/// The last pad a finger played, in the clock's microseconds (from the bus), and
+/// what idleBaking() was last told: the call is made on a change only.
+std::atomic<int64_t>         s_lastPadUs{0};
+crosspad::SubscriptionHandle s_padSub = nullptr;
+bool                         s_idleSent = false;
+constexpr int64_t            kUsPerMs = 1000;
 
 /// Where the level being left sat in the song above, for the click that lands there.
 int      s_returnTrack = -1;
@@ -828,6 +843,28 @@ static void watch_bakes(crosspad::ISongEngine* se)
     if (moved) rebuild_timeline();
 }
 
+/// The player is away -- the song stopped, no element job running and no pad
+/// played for kIdleBakeMs (core's, the one its own docs name) -- so the engine
+/// may bake the other songs' blocks of an element changed since. The press
+/// time comes off the bus: PadManager keeps none.
+static void idle_tick(crosspad::ISongEngine* se)
+{
+    if (!s_padSub) {
+        s_lastPadUs.store(crosspad::getClock().getTimeUs());
+        s_padSub = crosspad::getEventBus().subscribe(crosspad::EventType::PadPressed,
+            [](const void*, crosspad::EventType, void*) {
+                s_lastPadUs.store(crosspad::getClock().getTimeUs());
+            });
+    }
+    const int64_t quietUs = crosspad::getClock().getTimeUs() - s_lastPadUs.load();
+    const bool away = !se->playing() && !crosspad::elementNav().busy()
+                      && quietUs >= (int64_t)crosspad::kIdleBakeMs * kUsPerMs;
+    if (away != s_idleSent) {
+        s_idleSent = away;
+        se->idleBaking(away);
+    }
+}
+
 void elements_tick(crosspad::ISongEngine* se)
 {
     auto& nav = crosspad::elementNav();
@@ -837,6 +874,15 @@ void elements_tick(crosspad::ISongEngine* se)
     /* The job waits for a stopped song (a leave while it plays, fitting copies
      * of stretched audio), and the top bar's PLAY is outside the shield. */
     if (nav.busy() && se->playing()) se->stop();
+    if (r.done && s_rebaking) {
+        /* The enter of a "Rebake now" is only the way in: straight on out, no
+         * new level to settle into. The leave's own end is the job it reports. */
+        s_rebaking = false;
+        if (r.ok && r.job == crosspad::ElementNav::Job::Enter) {
+            leave_to(nav.depth() - 1);
+            return;
+        }
+    }
     if (r.done) {
         if (r.calledOff) {
             /* The user's own answer: nothing failed, nothing to say. */
@@ -861,6 +907,7 @@ void elements_tick(crosspad::ISongEngine* se)
     watch_bakes(se);
     ask_library(se);
     mini_tick(se);
+    idle_tick(se);
 }
 
 bool elements_back()
@@ -951,6 +998,14 @@ void elements_style_block(lv_obj_t* block, lv_obj_t* label, const crosspad::Song
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
         b.bakeBar = bar;
     }
+}
+
+void element_rebake_cb(lv_event_t*)
+{
+    close_overlay();
+    auto& nav = crosspad::elementNav();
+    if (nav.busy() || !elements_clip_edit()) return;
+    s_rebaking = nav.busy();
 }
 
 void element_new_cb(lv_event_t*)
@@ -1109,6 +1164,16 @@ void elements_destroy()
     s_busy = false;
     s_ask = Ask::None;
     s_libraryAsked = false;
+    /* The screen is the player's eyes on the pads and the clock: gone, there is
+     * no one to be away, and the engine is told so. */
+    if (s_padSub) {
+        crosspad::getEventBus().unsubscribe(s_padSub);
+        s_padSub = nullptr;
+    }
+    if (s_idleSent) {
+        s_idleSent = false;
+        if (auto* se = engine()) se->idleBaking(false);
+    }
 #ifdef ARR_USE_ENCODER
     if (s_busyGroup) { lv_group_delete(s_busyGroup); s_busyGroup = nullptr; }
 #endif

@@ -794,7 +794,7 @@ void edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging) return;
-    bool region = false, block = false, tracked = false;
+    bool region = false, block = false, tracked = false, stale = false;
     uint32_t a = 0, b = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -805,6 +805,8 @@ void edit_cb(lv_event_t*)
         b = song.loopEnd;
         const auto& cs = song.tracks[s_selTrack].clips;
         block = s_selIndex >= 0 && s_selIndex < (int)cs.size();
+        stale = block && cs[(size_t)s_selIndex].isElement()
+                && se->elementClipState((uint8_t)s_selTrack, (size_t)s_selIndex) == crosspad::ElementClipState::Stale;
     }
     char title[64];
     if (region) std::snprintf(title, sizeof(title), "Edit   (loop region: bars %u - %u)", (unsigned)(a + 1), (unsigned)b);
@@ -829,6 +831,7 @@ void edit_cb(lv_event_t*)
                  [](lv_event_t* e) { close_overlay(); add_cb(e); }, nullptr);
     overlay_item(LV_SYMBOL_PLUS " New element here", element_new_cb, nullptr);
     overlay_item(LV_SYMBOL_LIST " Element from library ...", element_library_cb, nullptr);
+    if (stale) overlay_item(LV_SYMBOL_REFRESH " Rebake now", element_rebake_cb, nullptr);
     if (tracked) {
         char cut[48];
         std::snprintf(cut, sizeof(cut), LV_SYMBOL_CUT " Cut track %d at bar %u", s_selTrack + 1,
