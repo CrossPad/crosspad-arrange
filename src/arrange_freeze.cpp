@@ -1,7 +1,9 @@
 // Arrange -- a Pitch seq track's sound (the keeper that borrows the instrument) and
-// auto-freeze of the seq tracks ARM leaves.
+// auto-freeze of the seq tracks ARM is not on.
 
 #include "arrange_internal.hpp"
+
+#include "crosspad/song/AutoFreeze.hpp"
 
 namespace arrange_ui {
 
@@ -49,71 +51,74 @@ static bool kit2_pads_wanted()
     return song.seqRoute(seqView ? f.track : song.armedSeqTrack()) == 1;
 }
 
-/* Auto-freeze (ISongEngine::freezeTrack): the seq track ARM leaves -- another
- * armed in its place, a new track added -- is frozen at once while the song
- * is stopped (else when it stops), with this screen up
- * (the seq view and Pitch Play use the sequencer a freeze takes), so the
- * tracks not being played cost a file's stream instead of an engine. One
- * already frozen as it is stays; PLAY, REC and DUB cancel a freeze, and the
- * next stop finishes it from the renders already on the card. A song opened
+/* Auto-freeze (ISongEngine::freezeTrack): every seq track ARM is not on that is
+ * not frozen as it is -- the one ARM just left, a new track added, and one gone
+ * stale since (its notes, its kit, the tempo) -- is frozen while the song is
+ * stopped, with this screen up (the seq view and Pitch Play use the sequencer a
+ * freeze takes), one at a time (crosspad::autoFreezeNext()), so the tracks not
+ * being played cost a file's stream instead of an engine. Only an ARM change
+ * froze before: a tempo turned or a kit picked left every track live for good
+ * (26.10.2026). PLAY, REC and DUB cancel a freeze, and the next stop finishes it
+ * from the renders already on the card; a freeze that failed is tried again
+ * after kRetryFirstMs, twice as long each time it fails again. A song opened
  * carries nothing over. */
+static constexpr uint32_t kRetryFirstMs = 2000;
+static constexpr uint32_t kRetryMostMs = 60000;
 static std::string s_freezeSong;
-static int         s_freezeArmed = -2;
-static uint8_t     s_freezeWanted = 0;     ///< a bit per track
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
+static uint32_t    s_retryAt[kTracks] = {};  ///< lv_tick of the next try after a failure; 0: none
+static uint32_t    s_retryMs[kTracks] = {};  ///< the wait after the next failure
 static uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
 
 static void auto_freeze(crosspad::ISongEngine* se)
 {
     /* An element's enter or leave freezes the tracks it needs itself. */
     if (!se || se->openState() != crosspad::SongOpState::Ready || crosspad::elementNav().busy()) return;
-    int armed = -1;
+    crosspad::FreezeState st[kTracks];
+    for (int t = 0; t < kTracks; ++t) st[t] = se->freezeState((uint8_t)t);
     std::string dir;
-    bool live[kTracks] = {};
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& song = se->song();
-        armed = song.armed;
-        dir = song.dir;
-        for (int t = 0; t < kTracks; ++t) {
-            const auto& tr = song.tracks[t];
-            live[t] = tr.inUse && song.seqRoute(t) >= 0 && (!tr.seqBlocks || !tr.clips.empty());
-        }
+        dir = se->song().dir;
     }
     if (dir != s_freezeSong) {
         s_freezeSong = dir;
-        s_freezeArmed = armed;
-        s_freezeWanted = 0;
         s_freezeRunning = -1;
+        for (int t = 0; t < kTracks; ++t) s_retryAt[t] = s_retryMs[t] = 0;
     }
-    if (armed != s_freezeArmed) {
-        if (s_freezeArmed >= 0 && s_freezeArmed < kTracks) s_freezeWanted |= (uint8_t)(1u << s_freezeArmed);
-        s_freezeArmed = armed;
-    }
-    if (armed >= 0 && armed < kTracks) s_freezeWanted &= (uint8_t)~(1u << armed);
 
     const bool bouncing = se->bounceStatus().state == crosspad::BounceState::Running;
+    const uint32_t now = lv_tick_get();
+    auto failed = [now](int t) {
+        s_retryMs[t] = s_retryMs[t] ? std::min(s_retryMs[t] * 2, kRetryMostMs) : kRetryFirstMs;
+        s_retryAt[t] = now + s_retryMs[t];
+    };
     if (s_freezeRunning >= 0 && !bouncing) {
-        /* Cancelled (PLAY) or failed: wanted again, made at the next stop
-         * unless it is armed by then. */
-        if (se->freezeState((uint8_t)s_freezeRunning) != crosspad::FreezeState::Frozen &&
-            s_freezeRunning != armed) {
-            s_freezeWanted |= (uint8_t)(1u << s_freezeRunning);
-        }
+        /* Over: made, or failed -- tried again later, each time later still. A
+         * PLAY's cancel is a failure too, and the stop that follows comes after
+         * the first wait anyway. */
+        const int t = s_freezeRunning;
+        if (st[t] == crosspad::FreezeState::Frozen) s_retryAt[t] = s_retryMs[t] = 0;
+        else                                         failed(t);
         s_freezeRunning = -1;
     }
-    if (s_freezeWanted && s_visible && !bouncing && !se->playing()) {
-        for (int t = 0; t < kTracks; ++t) {
-            if (!(s_freezeWanted & (1u << t))) continue;
-            s_freezeWanted &= (uint8_t)~(1u << t);
-            if (!live[t] || se->freezeState((uint8_t)t) == crosspad::FreezeState::Frozen) continue;
-            if (se->freezeTrack((uint8_t)t)) s_freezeRunning = t;
-            break;
+    if (s_visible && !bouncing && !se->playing() && s_freezeRunning < 0) {
+        uint8_t skip = 0;
+        for (int t = 0; t < kTracks; ++t)
+            if (s_retryAt[t] && (int32_t)(now - s_retryAt[t]) < 0) skip |= (uint8_t)(1u << t);
+        int next = -1;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            next = crosspad::autoFreezeNext(se->song(), st, skip);
+        }
+        if (next >= 0) {
+            if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
+            else                                failed(next);
         }
     }
 
     uint8_t shown = 0;
-    for (int t = 0; t < kTracks; ++t) shown |= (uint8_t)((uint8_t)se->freezeState((uint8_t)t) << (2 * t));
+    for (int t = 0; t < kTracks; ++t) shown |= (uint8_t)((uint8_t)st[t] << (2 * t));
     if (shown != s_freezeShown) {
         s_freezeShown = shown;
         if (s_visible && s_timeline) rebuild_timeline();
