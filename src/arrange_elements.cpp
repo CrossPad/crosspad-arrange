@@ -899,15 +899,24 @@ static void auto_rebake(crosspad::ISongEngine* se)
             if (refs[i].empty()) continue;
             const auto st = se->elementClipState((uint8_t)t, i);
             if (st != crosspad::ElementClipState::Stale && st != crosspad::ElementClipState::Missing) continue;
-            if (se->elementClipWhy((uint8_t)t, i).empty()) continue;   // the card's baker will
+            /* Only what entering and leaving mends: not an edit undecided, a child's
+             * state or a song.json that cannot be read -- and the card's baker does
+             * the rest by itself. */
+            if (!se->elementClipRebakes((uint8_t)t, i)) continue;
             auto retry = s_rebakeRetry.find(refs[i]);
             if (retry != s_rebakeRetry.end() && !retry->second.due(now)) continue;
             s_selTrack = t;
             s_selIndex = (int)i;
+            const std::string why = se->elementClipWhy((uint8_t)t, i);
             if (!elements_clip_edit()) continue;
             s_rebaking = nav.busy();
-            if (s_rebaking) s_autoRebake = refs[i];
-            else            s_rebakeRetry[refs[i]].failed(now);
+            if (s_rebaking) {
+                s_autoRebake = refs[i];
+                /* The screen goes in and out by itself: said why. */
+                note_fmt("Baking %s again: %s", element_title(refs[i]), why.c_str());
+            } else {
+                s_rebakeRetry[refs[i]].failed(now);
+            }
             return;
         }
     }
