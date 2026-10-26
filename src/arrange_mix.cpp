@@ -1,10 +1,10 @@
-// Arrange -- MIX: the four tracks' levels, a strip each, as on a desk.
+// Arrange -- MIX: the tracks' levels, a strip each, as on a desk.
 
 #include "arrange_internal.hpp"
 
 namespace arrange_ui {
 
-// ── MIX: the four tracks' levels ───────────────────────────────────────────
+// ── MIX: the tracks' levels ────────────────────────────────────────────────
 
 /* Fader travel as the Mixer app's: 0 is -inf, then 0.6 dB a step up to +6 dB
  * at the top, which puts unity at 90. */
@@ -211,6 +211,9 @@ static lv_obj_t* mix_meter_bar(lv_obj_t* parent)
     return b;
 }
 
+/// A strip's width with more than four: four to the window, the rest scrolled to.
+constexpr int32_t kStripMinW = 68;
+
 /// A track's strip, as on a DAW's mixer: its number and kind in its colour,
 /// the pan, a tall fader with the track's meter beside it, the dB, M and S.
 static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
@@ -219,6 +222,7 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_remove_style_all(strip);
     lv_obj_set_height(strip, LV_PCT(100));
     lv_obj_set_flex_grow(strip, 1);
+    lv_obj_set_style_min_width(strip, kStripMinW, 0);   // four fill the row; more scroll it
     lv_obj_set_style_bg_color(strip, kPanel, 0);
     lv_obj_set_style_bg_opa(strip, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(strip, 6, 0);
@@ -349,8 +353,10 @@ void mix_cb(lv_event_t*)
     auto* se = engine();
     if (!se || s_overlay) return;
     crosspad::SongTrack tracks[kTracks];
+    int shown = kShownTracks;   // the tracks in use, and the empty ones up to four
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        shown = std::max(se->song().usedTracks(), kShownTracks);
         for (int t = 0; t < kTracks; ++t) {
             const auto& src = se->song().tracks[t];
             tracks[t].inUse = src.inUse;
@@ -374,7 +380,10 @@ void mix_cb(lv_event_t*)
     lv_obj_t* strips = make_row(s_overlay, 10);
     lv_obj_set_flex_grow(strips, 1);
     lv_obj_set_style_pad_column(strips, 6, 0);
-    for (int t = 0; t < kTracks; ++t) mix_strip(strips, t, tracks[t]);
+    lv_obj_add_flag(strips, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(strips, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(strips, LV_SCROLLBAR_MODE_ACTIVE);
+    for (int t = 0; t < shown; ++t) mix_strip(strips, t, tracks[t]);
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, done);   // after the strips: the first fader has the focus
 #endif

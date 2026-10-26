@@ -675,7 +675,7 @@ static void region_set_cb(lv_event_t*)
 // ── merging tracks ─────────────────────────────────────────────────────────
 
 /// The tracks in @p mask, over the region or the whole song, into one clip.
-static void run_merge(uint8_t mask)
+static void run_merge(uint32_t mask)
 {
     auto* se = engine();
     close_overlay();
@@ -710,7 +710,7 @@ static void paint_merge_toggles()
 
 static void merge_toggle_cb(lv_event_t* e)
 {
-    s_mergeMask ^= (uint8_t)(1u << (int)(intptr_t)lv_event_get_user_data(e));
+    s_mergeMask ^= 1u << (int)(intptr_t)lv_event_get_user_data(e);
     paint_merge_toggles();
 }
 
@@ -727,16 +727,23 @@ static void merge_tracks_cb(lv_event_t*)
         else                  std::snprintf(buf, sizeof(buf), "Merge tracks, the whole song");
         where = buf;
     }
+    int shown = kShownTracks;   // the tracks in use, and the empty ones up to four
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        shown = std::max(se->song().usedTracks(), kShownTracks);
+    }
     close_overlay();
     overlay_list(where.c_str());
+    /* Four to a line, as many lines as it takes. */
     lv_obj_t* row = lv_obj_create(s_overlay);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), 34);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_column(row, 6, 0);
-    for (int t = 0; t < kTracks; ++t) {
+    lv_obj_set_style_pad_row(row, 4, 0);
+    for (int t = 0; t < shown; ++t) {
         lv_obj_t* b = lv_button_create(row);
-        lv_obj_set_height(b, 32);
+        lv_obj_set_size(b, LV_PCT(22), 32);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_radius(b, 6, 0);
         lv_obj_set_style_shadow_width(b, 0, 0);
@@ -771,7 +778,7 @@ static void merge_tracks_cb(lv_event_t*)
     }, nullptr);
 }
 
-static void merge_all_cb(lv_event_t*) { run_merge(0x0F); }
+static void merge_all_cb(lv_event_t*) { run_merge((uint32_t)((1ull << kTracks) - 1)); }
 
 // ── the EDIT menu ──────────────────────────────────────────────────────────
 

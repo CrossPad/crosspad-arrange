@@ -428,11 +428,16 @@ void rebuild_timeline()
         }
     }
 
-    /* Only the tracks somebody made. They are always the first of the four:
+    /* Only the tracks somebody made. They are always the first of them:
      * a track is taken from the lowest free one and removing one closes the
      * gap (AudioSong::freeTrack(), removeTrack()), so "in use" and "before
      * usedTracks()" are the same set. */
     const int used = song.usedTracks();
+    /* The lanes in use, and the empty ones under them up to a screenful. */
+    const int lanes = std::max(used, kShownTracks);
+    /* Drawn blocks per track: a long track must not use up the ones the others need. */
+    const int perTrack = kMaxBlocks / lanes;
+    size_lanes(std::max(used < kTracks ? used + 1 : used, kShownTracks));
     s_seqBlock = nullptr;
     s_seqBlockTrack = -1;
     for (int tr = 0; tr < used; ++tr) {
@@ -464,6 +469,7 @@ void rebuild_timeline()
             lv_obj_set_style_pad_top(o, 1, 0);
             lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, seq_lane_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)tr);
             lv_obj_add_event_cb(o, seq_lane_cb, LV_EVENT_CLICKED, (void*)(intptr_t)tr);
             s_seqLaneScene = song.tracks[tr].scene;
@@ -480,7 +486,7 @@ void rebuild_timeline()
         }
 
         const auto& cs = song.tracks[tr].clips;
-        for (int i = 0; i < (int)cs.size() && i < kMaxBlocksPerTrack && s_blockCount < kMaxBlocks; ++i) {
+        for (int i = 0; i < (int)cs.size() && i < perTrack && s_blockCount < kMaxBlocks; ++i) {
             const auto& c = cs[i];
             lv_obj_t* o = lv_obj_create(s_timeline);
             lv_obj_remove_style_all(o);
@@ -542,7 +548,7 @@ void rebuild_timeline()
     /* The end of the song: a line, and what lies past it dimmed -- blocks
      * there are kept but not played. */
     if (end) {
-        const int32_t h = kRulerH + 2 + kTracks * (kLaneH + kLaneGap);
+        const int32_t h = kRulerH + 2 + lanes * (kLaneH + kLaneGap);
         lv_obj_t* past = lv_obj_create(s_timeline);
         lv_obj_remove_style_all(past);
         lv_obj_set_pos(past, (int32_t)end * s_pxPerBar, 0);
@@ -563,7 +569,7 @@ void rebuild_timeline()
      * it, faint over the lanes, and a line at each end -- the one being
      * turned lit. */
     if (song.hasRegion()) {
-        const int32_t h = kRulerH + 2 + kTracks * (kLaneH + kLaneGap);
+        const int32_t h = kRulerH + 2 + lanes * (kLaneH + kLaneGap);
         const int32_t x1 = (int32_t)song.loopStart * s_pxPerBar, x2 = (int32_t)song.loopEnd * s_pxPerBar;
         auto band = [](int32_t x, int32_t y, int32_t w, int32_t hh, lv_color_t c, lv_opa_t opa) {
             lv_obj_t* o = lv_obj_create(s_timeline);
@@ -619,11 +625,16 @@ void rebuild_timeline()
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
+            /* A kit of its own the second kit engine is not playing, and no
+             * freeze to play instead: silent until one is made (kit_slot()). */
+            const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 1 &&
+                                song.liveRoute(t) < 0;
             if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], s_bouncing == t ? "BOUNCING..." : "FREEZING...");
             else if (frozen) set_text_fmt(s_headName[t], "FRZ %s", name);
+            else if (parked) set_text_fmt(s_headName[t], "PARKED %s", name);
             else set_text(s_headName[t], name);
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
-                                   : s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
+                                   : parked || s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);
@@ -637,17 +648,16 @@ void rebuild_timeline()
     }
 
     /* "+ ADD TRACK", in the slot of the first track nobody has made -- and
-     * gone once all four are. The counter beside it is the rule the player
+     * gone once all of them are. The counter beside it is the rule the player
      * needs before choosing: how many tracks are left, and how many seqs. */
     if (s_addRow) {
         if (used >= kTracks) {
             lv_obj_add_flag(s_addRow, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_addRow, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_y(s_addRow, ARR_Y(62) + kRulerH + 4 + used * (kLaneH + kLaneGap));
+            lv_obj_set_y(s_addRow, kRulerH + 4 + used * (kLaneH + kLaneGap));
             if (s_addInfo)
-                set_text_fmt(s_addInfo, "%d / %d tracks  -  seq %d / %d", used, kTracks,
-                             song.seqTracks(), crosspad::AudioSong::kMaxSeqTracks);
+                set_text_fmt(s_addInfo, "%d / %d tracks  -  seq %d", used, kTracks, song.seqTracks());
         }
     }
     lv_label_set_text(s_projLabel, song.name.empty() ? "(no card)" : song.name.c_str());

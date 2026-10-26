@@ -21,7 +21,7 @@ namespace arrange_ui {
  *                     yet: Pitch Play, to pick one)
  *
  * Every dialog says the same two things, because they are the rules a player
- * has to know before choosing and nobody reads them anywhere else: four
+ * has to know before choosing and nobody reads them anywhere else: kTracks
  * tracks, up to two seqs -- two kits, or one Pitch -- and any track can be
  * bounced to audio at any time, which is also how a seq slot comes free.
  */
@@ -175,7 +175,7 @@ static void choose_audio_cb(lv_event_t*)
         if (made < 0 || !song.addAudioTrack(made)) made = -1;
     }
     close_overlay();
-    if (made < 0) { note("No room: all four tracks are in use."); return; }
+    if (made < 0) { note("No room: all tracks are in use."); return; }
     /* An empty audio track is filled by recording into it, here: armed, the
      * next REC records its input over the song (ArrangeAudioTake). */
     {
@@ -254,7 +254,7 @@ static void choose_source_cb(lv_event_t* e)
     }
     const auto src = crosspad::SeqSource::Pitch;
     const int made = make_seq_track(src, {});
-    if (made < 0) { note("No room: all four tracks are in use, or a seq is already in the song."); return; }
+    if (made < 0) { note("No room: all tracks are in use, or a seq is already in the song."); return; }
     /* With no instrument picked yet the track has no sound: Pitch Play is
      * where one is picked, as the kit loader is for a kit track. */
     if (crosspad::instrumentPlayState().instrumentPath.empty()) {
@@ -306,7 +306,7 @@ static void kit_picked(const std::string& path, void*)
     }
     if (track < 0) {
         s_afterPick = make_seq_track(crosspad::SeqSource::Kit, path);
-        if (s_afterPick < 0) ui_toast_show("No room: all four tracks are in use, or both kit tracks are.", 3000, UI_TOAST_WARNING);
+        if (s_afterPick < 0) ui_toast_show("No room: all tracks or all eight scenes are in use.", 3000, UI_TOAST_WARNING);
         return;
     }
     {
@@ -397,7 +397,7 @@ static void new_track_sheet()
         used = se->song().usedTracks();
         seqFree = se->song().seqSlotFree() || se->song().freeSeqRoute(crosspad::SeqSource::Pitch) >= 0;
     }
-    if (used >= kTracks) { note("All four tracks are in use."); return; }
+    if (used >= kTracks) { note("All tracks are in use."); return; }
 
     sheet_open();
     char title[32];
@@ -411,11 +411,11 @@ static void new_track_sheet()
     sheet_card(4, "AUDIO", "Audio", "a recorded or loaded loop,", "plays as clips",
                kAudioT, true, choose_audio_cb, nullptr);
     sheet_card(164, "KITS", "Kits",
-               seqFree ? "drums, slices, a kit," : "no kit slot is free:",
+               seqFree ? "drums, slices, a kit," : "no scene is free:",
                seqFree ? "or Pitch Play"         : "bounce one to free it",
                kAccent, seqFree, choose_seq_cb, nullptr);
 
-    sheet_rules("4 tracks: up to 2 kits and 1 Pitch, the rest audio.",
+    sheet_rules("Only the armed track plays live; the rest frozen.",
                 "Any track can be bounced to audio at any time.");
     static const char* kLabels[] = {"CANCEL"};
     static const lv_event_cb_t kCbs[] = {cancel_sheet_cb};
@@ -451,7 +451,7 @@ static void seq_source_sheet()
     sheet_tile(164, 1, "PITCH PLAY", "Pitch", pitch ? "melody, 4 voices" : "slot taken",
                kPitchT, pitch, choose_source_cb, (void*)(intptr_t)NewSeq::Pitch);
 
-    sheet_rules(kitRoute == 1 ? "A second kit plays beside the first, five voices each."
+    sheet_rules(kitRoute == 1 ? "A kit of its own: plays live armed, frozen when not."
                               : "A kit track: pick its kit, then REC records into it.",
                 "Bounce turns a track into audio and frees its slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
@@ -467,11 +467,19 @@ static void bounce_go_cb(lv_event_t*)
     if (!se) return;
     /* A Pitch track is bounced through its instrument, so it has to be in:
      * notes before the bank is built would be silence in the clip. */
-    bool pitch = false, second = false;
+    bool pitch = false, second = false, parked = false;
+    std::string ownKit;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        pitch = se->song().tracks[track].source == crosspad::SeqSource::Pitch;
-        second = se->song().seqRoute(track) == 1;
+        const auto& song = se->song();
+        pitch = song.tracks[track].source == crosspad::SeqSource::Pitch;
+        second = song.seqRoute(track) == 1;
+        parked = second && song.liveRoute(track) < 0;
+        ownKit = song.tracks[track].kit;
+    }
+    if (parked) {
+        note("The second kit plays another track now -- ARM this one, then BOUNCE.");
+        return;
     }
     if (pitch && !crosspad::seqTrackSound().pitch.ready()) {
         note("The track's instrument is still loading -- BOUNCE again in a moment.");
@@ -479,7 +487,7 @@ static void bounce_go_cb(lv_event_t*)
     }
     /* The second kit is bounced through its engine, which loads on its own. */
     crosspad::ISecondKit* kit2 = crosspad::getPlatformServices().secondKit;
-    if (second && (!kit2 || kit2->state() != crosspad::ISecondKit::State::Ready)) {
+    if (second && (!kit2 || kit2->state() != crosspad::ISecondKit::State::Ready || kit2->kit() != ownKit)) {
         note("The track's kit is still loading -- BOUNCE again in a moment.");
         return;
     }

@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,7 +11,7 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.26.0,<3.0.0",
+    "crosspad-core": ">=2.27.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [

@@ -62,6 +62,8 @@ extern "C" {
 namespace arrange_ui {
 
 inline constexpr int      kTracks   = crosspad::AudioSong::kTracks;
+/// Lanes on screen at once; more scroll up and down under them.
+inline constexpr int      kShownTracks = 4;
 /* A screen y as a y inside the root: the root fills the app container, which
  * begins under the transport bar. The whole screen is laid out in the
  * export's screen coordinates -- drawn under a 30 px bar -- and this is the
@@ -110,8 +112,6 @@ inline constexpr int32_t  kMeterW   = 10;     ///< a track's stereo meter, besid
 inline constexpr int      kMeterSegs = 10;
 inline constexpr uint32_t kTickMs   = 50;
 inline constexpr int      kMaxBlocks = 64;
-/// Drawn blocks per track: a long track must not use up the ones the others need.
-inline constexpr int      kMaxBlocksPerTrack = kMaxBlocks / kTracks;
 
 inline const lv_color_t kBg     = lv_color_hex(0x16181B);
 inline const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -135,8 +135,9 @@ inline const lv_color_t kWell   = lv_color_hex(0x1B1E22);     // S / M off, a me
 inline const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
- * Arrange holds four tracks, up to three of them seqs: two kit tracks, a kit
- * each, and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
+ * Arrange holds kTracks tracks, any of them seqs (a scene each): kit tracks, a
+ * kit each, taking turns on the second kit engine and playing their freeze
+ * while they wait (kit_slot()), and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
  * the "+ ADD TRACK" row -- AUDIO is recorded into here, KITS asks for Perf,
  * Drums, Slice or Pitch, also recorded into here -- and any track
  * can be bounced to audio at any time, which is also how a seq slot is freed
@@ -306,7 +307,7 @@ extern bool       s_regionArmed;
 extern std::vector<crosspad::RangeClip> s_clipboard;
 extern uint32_t  s_clipboardBars;
 extern bool      s_merging;
-extern uint8_t   s_mergeMask;
+extern uint32_t  s_mergeMask;
 extern lv_obj_t* s_mergeToggles[kTracks];
 extern lv_obj_t* s_nameArea;
 extern int s_afterPick;
@@ -374,6 +375,8 @@ void track_menu();
 void clip_edit_cb(lv_event_t*);
 lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb_t cb, void* ud = nullptr);
 lv_obj_t* make_row(lv_obj_t* parent, int32_t h);
+/// The lanes, their headers and meters @p rows tall; past kShownTracks they scroll.
+void size_lanes(int rows);
 void toggle_mute(int t);
 void toggle_solo(int t);
 void arm_track(int t);

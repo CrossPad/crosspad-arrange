@@ -1,9 +1,9 @@
 /**
  * @file ArrangeApp.cpp
- * @brief Arrange -- where a song starts, and the four tracks it is made of.
+ * @brief Arrange -- where a song starts, and the tracks it is made of.
  *
  * The main place of work on the CrossPad (UX 2000 section 6). A song holds
- * four tracks, up to two of them seqs: two kit tracks, each playing a kit of
+ * up to kTracks tracks, up to two of them seqs: two kit tracks, each playing a kit of
  * its own, or one Pitch track. A track is made here and filled here: AUDIO
  * leaves an empty audio track armed, so REC records its input into it over
  * the song (ArrangeAudioTake; the input -- the mics, the line-in, both, USB
@@ -46,7 +46,7 @@
  *   keys   MOVE, DUP and DEL act on the selected block; EDIT is the song's
  *          own editing (below). CLIP EDIT opens the selected track where it
  *          is made -- a seq block in the seq view, the block itself
- *   MIX    the four tracks' levels: a strip each side by side, as on a desk --
+ *   MIX    the tracks' levels: a strip each side by side, as on a desk --
  *          a tall fader in dB (-inf, then 0.6 dB a step as in the Mixer app,
  *          unity at 90 %, +6 dB at the top), the dB, M; heard at once, saved
  *          with the song
@@ -178,8 +178,7 @@ lv_obj_t* s_trackNameArea = nullptr;   ///< RENAME's field, while its sheet is u
 lv_obj_t* s_procBox = nullptr;         ///< "processing time stretch", over the lanes
 lv_obj_t* s_procLabel = nullptr;
 /* The row under the last track: the one way a track is made. It is drawn in
- * the slot the first track nobody has made would occupy, so the block of
- * lanes never grows past the four it is sized for. */
+ * the slot the first track nobody has made would occupy. */
 lv_obj_t* s_addRow = nullptr;
 lv_obj_t* s_addInfo = nullptr;
 /* A seq track's notes, drawn where its lane is. One object, no children:
@@ -271,7 +270,7 @@ uint32_t  s_clipboardBars = 0;
 
 /* A merge the platform is doing on the card, and the tracks picked for one. */
 bool      s_merging = false;
-uint8_t   s_mergeMask = 0x0F;
+uint32_t  s_mergeMask = (uint32_t)((1ull << kTracks) - 1);
 lv_obj_t* s_mergeToggles[kTracks] = {};
 
 crosspad::ISongEngine* engine()
@@ -362,6 +361,17 @@ static lv_obj_t* tool_button(lv_obj_t* parent, int32_t w, const char* text, lv_e
     return b;
 }
 
+/* The columns beside the timeline, sized with it to the rows in use. */
+static lv_obj_t* s_headCol = nullptr;
+static lv_obj_t* s_meterCol = nullptr;
+
+void size_lanes(int rows)
+{
+    const int32_t h = kRulerH + 4 + rows * (kLaneH + kLaneGap);
+    for (lv_obj_t* o : {s_headCol, s_timeline, s_meterCol})
+        if (o && lv_obj_get_height(o) != h) lv_obj_set_height(o, h);
+}
+
 lv_obj_t* make_row(lv_obj_t* parent, int32_t h)
 {
     lv_obj_t* r = lv_obj_create(parent);
@@ -445,26 +455,31 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     elements_build_crumbs(s_root);
 
     /* ── lanes: the track buttons fixed, the timeline scrolling beside them ──
-     * The export's LANE_X=48 and a lane block from screen y=62 to 200. */
-    constexpr int32_t kBodyH = kRulerH + 4 + kTracks * (kLaneH + kLaneGap);
+     * The export's LANE_X=48 and a lane block from screen y=62 to 200: four
+     * lanes, and the rest of the tracks scroll up and down under them, headers,
+     * lanes and meters together (size_lanes()). */
+    constexpr int32_t kBodyH = kRulerH + 4 + kShownTracks * (kLaneH + kLaneGap);
     lv_obj_t* body = lv_obj_create(s_root);
     lv_obj_remove_style_all(body);
     place(body, 4, ARR_Y(62));
     lv_obj_set_size(body, 312, kBodyH);
-    lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_ACTIVE);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(body, 4, 0);   // 4 + 80 + 4: the lanes from x 88 to 302, the meters on 306
 
     lv_obj_t* heads = lv_obj_create(body);
     lv_obj_remove_style_all(heads);
-    lv_obj_set_size(heads, kHeadW, LV_PCT(100));
+    lv_obj_set_width(heads, kHeadW);
     lv_obj_remove_flag(heads, LV_OBJ_FLAG_SCROLLABLE);
     elements_build_solo(heads);
+    s_headCol = heads;
     for (int t = 0; t < kTracks; ++t) {
         lv_obj_t* h = lv_button_create(heads);
         lv_obj_set_pos(h, 0, kRulerH + 4 + t * (kLaneH + kLaneGap));
         lv_obj_set_size(h, kHeadW, kLaneH);
+        lv_obj_add_flag(h, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
         lv_obj_set_style_radius(h, 4, 0);
         lv_obj_set_style_shadow_width(h, 0, 0);
         lv_obj_set_style_pad_all(h, 0, 0);
@@ -556,12 +571,14 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 
     /* The row that makes a track: full width, under the last one in use,
      * outlined rather than filled -- it is not a track, it is the offer of
-     * one. Placed on the root, not inside the lanes, so it does not scroll
-     * with the timeline and the lane block stays sized for four. */
-    s_addRow = lv_button_create(s_root);
+     * one. In the lanes' block but out of its row of columns, so it scrolls
+     * up and down with the tracks and not sideways with the timeline. */
+    s_addRow = lv_button_create(body);
     lv_obj_remove_style_all(s_addRow);
+    lv_obj_add_flag(s_addRow, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(s_addRow, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     lv_obj_set_size(s_addRow, 312, kLaneH);
-    place(s_addRow, 4, ARR_Y(62) + kRulerH + 4);
+    place(s_addRow, 0, kRulerH + 4);
     lv_obj_set_style_radius(s_addRow, 4, 0);
     lv_obj_set_style_bg_color(s_addRow, kLane, 0);
     lv_obj_set_style_bg_opa(s_addRow, LV_OPA_COVER, 0);
@@ -587,7 +604,6 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 
     s_timeline = lv_obj_create(body);
     lv_obj_remove_style_all(s_timeline);
-    lv_obj_set_height(s_timeline, LV_PCT(100));
     lv_obj_set_flex_grow(s_timeline, 1);
     lv_obj_set_style_bg_color(s_timeline, kPanel, 0);
     lv_obj_set_style_bg_opa(s_timeline, LV_OPA_COVER, 0);
@@ -603,9 +619,10 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * fifth until lit (show_meters). */
     lv_obj_t* meters = lv_obj_create(body);
     lv_obj_remove_style_all(meters);
-    lv_obj_set_size(meters, kMeterW, LV_PCT(100));
+    lv_obj_set_width(meters, kMeterW);
     lv_obj_remove_flag(meters, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(meters, LV_OBJ_FLAG_CLICKABLE);
+    s_meterCol = meters;
     for (int t = 0; t < kTracks; ++t) {
         lv_obj_t* well = lv_obj_create(meters);
         lv_obj_remove_style_all(well);
@@ -633,6 +650,11 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         }
         s_meterWell[t] = well;
     }
+    size_lanes(kShownTracks);
+    /* Over the timeline and the meters, made after it: a sibling drawn
+     * later covers it, and the add row was a strip of outline under the
+     * timeline's panel. */
+    lv_obj_move_foreground(s_addRow);
 
     /* ── tools on the selected block ──────────────────────────────────────
      * The export's five keys at 58 px on a 62 px pitch, filling the width.
@@ -816,6 +838,7 @@ void Arrange_destroy(lv_obj_t* root)
     s_blockCount = 0;
     /* the status line went with the screen */
     s_root = s_timeline = s_playhead = s_projLabel = s_posLabel = nullptr;
+    s_headCol = s_meterCol = nullptr;
     s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 
 #ifdef ARR_USE_ENCODER

@@ -1,5 +1,5 @@
-// Arrange -- a Pitch seq track's sound (the keeper that borrows the instrument) and
-// auto-freeze of the seq tracks ARM is not on.
+// Arrange -- a Pitch seq track's sound (the keeper that borrows the instrument),
+// auto-freeze of the seq tracks ARM is not on, and which kit track the second kit plays.
 
 #include "arrange_internal.hpp"
 
@@ -36,19 +36,25 @@ static bool song_has_pitch_track()
     return false;
 }
 
+/// The track the seq view has open, or -1 when it is not on screen.
+static int seq_view_track()
+{
+    const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+    crosspad_gui::ILvglApp* fg = crosspad_gui::AppOrchestrator::getInstance().getForegroundApp();
+    return f.held() && f.seq && fg && std::strcmp(fg->getName(), "Sequencer") == 0 ? f.track : -1;
+}
+
 /// The pads play the second kit: its track armed with this screen up, or
-/// the seq view open on that track.
+/// the seq view open on that track -- while the second kit is that track's.
 static bool kit2_pads_wanted()
 {
     auto* se = engine();
     if (!se || !crosspad::getPlatformServices().secondKit) return false;
-    const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
-    crosspad_gui::ILvglApp* fg = crosspad_gui::AppOrchestrator::getInstance().getForegroundApp();
-    const bool seqView = f.held() && f.seq && fg && std::strcmp(fg->getName(), "Sequencer") == 0;
-    if (!s_visible && !seqView) return false;
+    const int seqView = seq_view_track();
+    if (!s_visible && seqView < 0) return false;
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     const auto& song = se->song();
-    return song.seqRoute(seqView ? f.track : song.armedSeqTrack()) == 1;
+    return song.liveRoute(seqView >= 0 ? seqView : song.armedSeqTrack()) == 1;
 }
 
 /* Auto-freeze (ISongEngine::freezeTrack): every seq track ARM is not on that is
@@ -65,7 +71,68 @@ static bool kit2_pads_wanted()
 static std::string s_freezeSong;
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
 static crosspad::RetryBackoff s_freezeRetry[kTracks];   ///< after a failed freeze, on lv_tick
-static uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
+static uint64_t    s_freezeShown = UINT64_MAX;   ///< freezeState() of each track, two bits, as last drawn
+
+/// The engine track @p t plays through holds its sound, loaded: what a freeze
+/// renders is the track's. The second kit, its own kit; the pads' kit, the
+/// song's; Pitch, the instrument.
+static bool engine_holds(const crosspad::AudioSong& song, int t)
+{
+    switch (song.liveRoute(t)) {
+    case 0: {
+        crosspad::IKitManager* km = crosspad::getKitManager();
+        const crosspad::KitInfo* cur = km ? km->getCurrentKit() : nullptr;
+        return cur && cur->path == song.kit;
+    }
+    case 1: {
+        const crosspad::ISecondKit* k = crosspad::getPlatformServices().secondKit;
+        return k && k->state() == crosspad::ISecondKit::State::Ready && k->kit() == song.tracks[t].kit;
+    }
+    case 2:
+        return crosspad::seqTrackSound().pitch.ready();
+    default:
+        return false;
+    }
+}
+
+/* The second kit engine plays one kit track with a kit of its own at a time
+ * (AudioSong::kitSlot), and any number of them are in a song: the rest play
+ * their freeze. It goes to the track being played into -- the one the seq
+ * view has open, else the armed one -- once the track holding it is frozen
+ * (auto_freeze() freezes it, not being armed); with no such track wanting
+ * it, to one still to be frozen, which is then frozen in its turn. Only with
+ * the song stopped and this screen up, as a freeze: the next holder's kit
+ * loads while it waits. @p st is freezeState() of each track, @p skip the
+ * tracks whose last freeze failed and is not due again. */
+static void kit_slot(crosspad::ISongEngine* se, const crosspad::FreezeState* st, uint32_t skip)
+{
+    const int seqView = seq_view_track();
+    int holder = -1, next = -1;
+    bool holderWaits = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        auto plays = [&](int t) { return song.seqRoute(t) == 1 && !song.seqPlaysNothing(t); };
+        holder = song.seqRoute(song.kitSlot) == 1 ? song.kitSlot : -1;
+        /* The holder keeps it until it is frozen, unless it has nothing to
+         * freeze or its freeze keeps failing. */
+        holderWaits = holder >= 0 && plays(holder) && st[holder] != crosspad::FreezeState::Frozen &&
+                      !(skip & (1u << holder));
+        const int want = seqView >= 0 ? seqView : song.armed;
+        if (want >= 0 && song.seqRoute(want) == 1) {
+            next = want;
+        } else {
+            for (int t = 0; t < kTracks && next < 0; ++t)
+                if (t != holder && plays(t) && !(skip & (1u << t)) && st[t] != crosspad::FreezeState::Frozen) next = t;
+        }
+    }
+    if (next < 0 || next == holder || holderWaits) return;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        se->song().kitSlot = (int8_t)next;
+    }
+    se->commit();
+}
 
 static void auto_freeze(crosspad::ISongEngine* se)
 {
@@ -96,13 +163,19 @@ static void auto_freeze(crosspad::ISongEngine* se)
         s_freezeRunning = -1;
     }
     if (s_visible && !bouncing && !se->playing() && s_freezeRunning < 0) {
-        uint8_t skip = 0;
+        uint32_t skip = 0;
         for (int t = 0; t < kTracks; ++t)
-            if (!s_freezeRetry[t].due(now)) skip |= (uint8_t)(1u << t);
+            if (!s_freezeRetry[t].due(now)) skip |= 1u << t;
+        kit_slot(se, st, skip);
         int next = -1;
         {
             std::lock_guard<std::recursive_mutex> l(se->songMutex());
-            next = crosspad::autoFreezeNext(se->song(), st, skip);
+            const auto& song = se->song();
+            /* Its sound not in its engine yet (a kit loading, the second kit
+             * just handed over): waited for, not a failure. */
+            for (int t = 0; t < kTracks; ++t)
+                if (song.liveRoute(t) >= 0 && !engine_holds(song, t)) skip |= 1u << t;
+            next = crosspad::autoFreezeNext(song, st, skip);
         }
         if (next >= 0) {
             if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
@@ -110,8 +183,8 @@ static void auto_freeze(crosspad::ISongEngine* se)
         }
     }
 
-    uint8_t shown = 0;
-    for (int t = 0; t < kTracks; ++t) shown |= (uint8_t)((uint8_t)st[t] << (2 * t));
+    uint64_t shown = 0;
+    for (int t = 0; t < kTracks; ++t) shown |= (uint64_t)st[t] << (2 * t);
     if (shown != s_freezeShown) {
         s_freezeShown = shown;
         if (s_visible && s_timeline) rebuild_timeline();
