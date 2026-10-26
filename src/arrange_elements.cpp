@@ -11,6 +11,7 @@
 #include "crosspad/event/IEventBus.hpp"
 
 #include <atomic>
+#include <map>
 
 namespace arrange_ui {
 
@@ -74,6 +75,16 @@ uint32_t s_libraryGen    = 0;
 /// A "Rebake now" is an enter of the Stale block's element and, the moment that
 /// ends, its leave: the leave is what bakes (processing box and all).
 bool     s_rebaking = false;
+
+/// A block that can be baked only on the engine -- its element's kit tracks frozen at
+/// another tempo, after the top bar's BPM turned -- played its old bake, pitched by
+/// the varispeed, until someone found "Rebake now" in EDIT (26.10.2026). With the
+/// song stopped and nothing touched for kAutoRebakeMs, the rebake runs by itself,
+/// one element at a time, its processing box up; one that fails waits its turn
+/// again on a RetryBackoff of its own.
+constexpr uint32_t kAutoRebakeMs = 3000;
+std::string s_autoRebake;                                   ///< the element the running rebake is for
+std::map<std::string, crosspad::RetryBackoff> s_rebakeRetry;
 
 /// The last pad a finger played, in the clock's microseconds (from the bus), and
 /// what idleBaking() was last told: the call is made on a change only.
@@ -868,6 +879,40 @@ static void idle_tick(crosspad::ISongEngine* se)
     }
 }
 
+/// The first element block only the engine can bake (see kAutoRebakeMs), as a
+/// "Rebake now" on it: selected, entered, and left at once by elements_tick().
+static void auto_rebake(crosspad::ISongEngine* se)
+{
+    auto& nav = crosspad::elementNav();
+    if (!s_visible || s_overlay || nav.busy() || se->playing() || !s_autoRebake.empty()) return;
+    if (lv_display_get_inactive_time(nullptr) < kAutoRebakeMs) return;
+    const int64_t quietUs = crosspad::getClock().getTimeUs() - s_lastPadUs.load();
+    if (quietUs < (int64_t)kAutoRebakeMs * kUsPerMs) return;
+    const uint32_t now = lv_tick_get();
+    for (int t = 0; t < kTracks; ++t) {
+        std::vector<std::string> refs;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            for (const auto& c : se->song().tracks[t].clips) refs.push_back(c.element);
+        }
+        for (size_t i = 0; i < refs.size(); ++i) {
+            if (refs[i].empty()) continue;
+            const auto st = se->elementClipState((uint8_t)t, i);
+            if (st != crosspad::ElementClipState::Stale && st != crosspad::ElementClipState::Missing) continue;
+            if (se->elementClipWhy((uint8_t)t, i).empty()) continue;   // the card's baker will
+            auto retry = s_rebakeRetry.find(refs[i]);
+            if (retry != s_rebakeRetry.end() && !retry->second.due(now)) continue;
+            s_selTrack = t;
+            s_selIndex = (int)i;
+            if (!elements_clip_edit()) continue;
+            s_rebaking = nav.busy();
+            if (s_rebaking) s_autoRebake = refs[i];
+            else            s_rebakeRetry[refs[i]].failed(now);
+            return;
+        }
+    }
+}
+
 void elements_tick(crosspad::ISongEngine* se)
 {
     auto& nav = crosspad::elementNav();
@@ -885,6 +930,11 @@ void elements_tick(crosspad::ISongEngine* se)
             leave_to(nav.depth() - 1);
             return;
         }
+    }
+    if (r.done && !s_autoRebake.empty()) {
+        if (r.ok) s_rebakeRetry.erase(s_autoRebake);
+        else      s_rebakeRetry[s_autoRebake].failed(lv_tick_get());
+        s_autoRebake.clear();
     }
     if (r.done) {
         if (r.calledOff) {
@@ -911,6 +961,7 @@ void elements_tick(crosspad::ISongEngine* se)
     ask_library(se);
     mini_tick(se);
     idle_tick(se);
+    auto_rebake(se);
 }
 
 bool elements_back()
