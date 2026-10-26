@@ -236,18 +236,16 @@ void tick_cb(lv_timer_t*)
         if (s_mixMeter[0][0]) mix_meters(se);
         return;
     }
-    uint32_t shape = 0, total = 0;
+    uint32_t shape = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         shape = song_shape(se->song());
-        total = se->playEndBars();
     }
     if (shape != s_shape) rebuild_timeline();
     show_meters(se);
     sync_transport();
 
     if (!s_playhead) return;
-    char buf[32];
     if (!se->playing()) {
         /* Stopped, it stands where PLAY starts: the top bar's position turns
          * it a bar a detent, and the grid follows it there -- only when it
@@ -266,8 +264,6 @@ void tick_cb(lv_timer_t*)
                 lv_obj_scroll_to_x(s_timeline, x > view / 3 ? x - view / 3 : 0, LV_ANIM_ON);
             }
         }
-        std::snprintf(buf, sizeof(buf), "%u bars", (unsigned)total);
-        set_text(s_posLabel, buf);
         return;
     }
     const double pos = se->positionBars();
@@ -282,8 +278,6 @@ void tick_cb(lv_timer_t*)
                            ? kRec : kHead);
     if (lv_obj_has_flag(s_playhead, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_playhead, LV_OBJ_FLAG_HIDDEN);
     if (lv_obj_get_x(s_playhead) != x) lv_obj_set_pos(s_playhead, x, 0);
-    std::snprintf(buf, sizeof(buf), "bar %d/%u", (int)pos + 1, (unsigned)total);
-    set_text(s_posLabel, buf);
 
     /* FOLLOW off: the lanes stay where the player put them, and the playhead
      * may run off them. */

@@ -224,7 +224,7 @@ extern lv_obj_t* s_root;
 extern lv_obj_t* s_timeline;
 extern lv_obj_t* s_playhead;
 extern lv_obj_t* s_projLabel;
-extern lv_obj_t* s_posLabel;
+extern lv_obj_t* s_mixBtn;
 extern lv_obj_t* s_loopBtn;
 extern lv_obj_t* s_syncBtn;
 extern lv_obj_t* s_editBtn;
@@ -233,6 +233,7 @@ extern bool      s_follow;
 extern lv_obj_t* s_heads[kTracks];
 extern lv_obj_t* s_headNum[kTracks];
 extern lv_obj_t* s_headName[kTracks];
+extern lv_obj_t* s_headIce[kTracks];   ///< a frozen track's snowflake, before its name
 extern lv_obj_t* s_headMute[kTracks];
 extern lv_obj_t* s_headSolo[kTracks];
 extern lv_obj_t* s_headArm[kTracks];

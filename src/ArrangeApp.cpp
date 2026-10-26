@@ -154,7 +154,7 @@ lv_obj_t* s_root = nullptr;
 lv_obj_t* s_timeline = nullptr;
 lv_obj_t* s_playhead = nullptr;
 lv_obj_t* s_projLabel = nullptr;
-lv_obj_t* s_posLabel = nullptr;
+lv_obj_t* s_mixBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
 lv_obj_t* s_editBtn = nullptr;   ///< the timeline's EDIT, beside SYNC
@@ -165,6 +165,40 @@ bool      s_follow = true;
 lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
+lv_obj_t* s_headIce[kTracks] = {};
+
+/* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
+ * the image's recolour (kIce), so no font has to carry the glyph. */
+static const uint8_t kSnowflakeA8[13 * 13] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x4c, 0xc3, 0xff, 0xc3, 0x4c, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x6c, 0x3c, 0x00, 0x8f, 0xff, 0x8f, 0x00, 0x3c, 0x6c, 0x00, 0x00,
+    0x20, 0xe7, 0xc7, 0x93, 0x00, 0x00, 0xff, 0x00, 0x00, 0x93, 0xc7, 0xe7, 0x20,
+    0x00, 0x80, 0xff, 0xe3, 0x3c, 0x00, 0xff, 0x00, 0x3c, 0xe3, 0xff, 0x80, 0x00,
+    0x00, 0xa7, 0x74, 0x60, 0xe3, 0xa7, 0xff, 0xa7, 0xe3, 0x60, 0x74, 0xa7, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x10, 0xdf, 0xff, 0xdf, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0xa7, 0x74, 0x60, 0xe3, 0xa7, 0xff, 0xa7, 0xe3, 0x60, 0x74, 0xa7, 0x00,
+    0x00, 0x80, 0xff, 0xe3, 0x3c, 0x00, 0xff, 0x00, 0x3c, 0xe3, 0xff, 0x80, 0x00,
+    0x20, 0xe7, 0xc7, 0x93, 0x00, 0x00, 0xff, 0x00, 0x00, 0x93, 0xc7, 0xe7, 0x20,
+    0x00, 0x00, 0x6c, 0x3c, 0x00, 0x8f, 0xff, 0x8f, 0x00, 0x3c, 0x6c, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x4c, 0xc3, 0xff, 0xc3, 0x4c, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+const lv_image_dsc_t* snowflake_image()
+{
+    static lv_image_dsc_t dsc;
+    if (!dsc.data) {
+        dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        dsc.header.cf = LV_COLOR_FORMAT_A8;
+        dsc.header.w = 13;
+        dsc.header.h = 13;
+        dsc.header.stride = 13;
+        dsc.data_size = sizeof(kSnowflakeA8);
+        dsc.data = kSnowflakeA8;
+    }
+    return &dsc;
+}
 lv_obj_t* s_headMute[kTracks] = {};
 lv_obj_t* s_headSolo[kTracks] = {};
 lv_obj_t* s_headArm[kTracks] = {};   ///< ARM: REC takes onto the track (its pads, or its input)
@@ -419,23 +453,11 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     lv_obj_set_width(s_projLabel, 52);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* The export's dim "18 bars". It carries this screen's status line too:
-     * what the encoder does in the loop region, that a clip is missing from
-     * clips/, that the song is empty and where to start. Scrolled, because
-     * those sentences are longer than the slot and the export leaves no row
-     * for them. */
-    s_posLabel = lv_label_create(s_root);
-    lv_obj_set_width(s_posLabel, 42);
-    place(s_posLabel, 67, ARR_Y(40));
-    lv_obj_set_style_text_font(s_posLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(s_posLabel, kDim, 0);
-    lv_obj_set_style_text_align(s_posLabel, LV_TEXT_ALIGN_RIGHT, 0);
-    /* DOT, not SCROLL: a scrolling label is only clipped to a width it
-     * actually has, and this one spilled its sentence across the whole top of
-     * the screen. The slot carries the export's own words -- "18 bars",
-     * "bar 2 / 4" -- which fit; anything longer is said in a toast. */
-    lv_label_set_long_mode(s_posLabel, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_posLabel, "");
+    /* MIX beside the song, where the export's dim "18 bars" was: the
+     * tracks' desk one press away (it was only a long press on a track's
+     * button), and the position is the top bar's anyway. */
+    s_mixBtn = make_button(s_root, 42, "MIX", mix_cb);
+    place(s_mixBtn, 67, ARR_Y(35));
 
     /* EDIT here is the timeline's: the loop region, copy / paste, merging,
      * the song's length, a clip from the library (edit_cb). The key at the
@@ -508,6 +530,16 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_set_width(name, kHeadW - 10);
         lv_label_set_text(name, "");
         lv_obj_set_pos(name, 5, 11);            // 17 px of line in a 28 px lane
+        /* Frozen: the snowflake where the name began, the name after it
+         * (rebuild_timeline()). */
+        lv_obj_t* ice = lv_image_create(h);
+        lv_image_set_src(ice, snowflake_image());
+        lv_obj_set_style_image_recolor(ice, kIce, 0);
+        lv_obj_set_style_image_recolor_opa(ice, LV_OPA_COVER, 0);
+        lv_obj_set_pos(ice, 5, 13);
+        lv_obj_remove_flag(ice, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(ice, LV_OBJ_FLAG_HIDDEN);
+        s_headIce[t] = ice;
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -658,8 +690,9 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 
     /* ── tools on the selected block ──────────────────────────────────────
      * The export's five keys at 58 px on a 62 px pitch, filling the width.
-     * Z- and Z+ became ZOOM in the context row and MIX a long press on a
-     * track button; everything else is where it was. MOVE stays an editable
+     * Z- and Z+ became ZOOM in the context row and MIX a key there beside the
+     * song (and a long press on a track button); everything else is where it
+     * was. MOVE stays an editable
      * button -- the encoder nudges the block with it, which no plain key
      * could do. */
     constexpr int32_t kToolW = 74, kToolPitch = 78, kToolH = 28;
@@ -829,6 +862,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& h : s_heads) h = nullptr;
     for (auto& l : s_headNum) l = nullptr;
     for (auto& l : s_headName) l = nullptr;
+    for (auto& i : s_headIce) i = nullptr;
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
     for (auto& w : s_meterWell) w = nullptr;
@@ -837,7 +871,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& t : s_tools) t = nullptr;
     s_blockCount = 0;
     /* the status line went with the screen */
-    s_root = s_timeline = s_playhead = s_projLabel = s_posLabel = nullptr;
+    s_root = s_timeline = s_playhead = s_projLabel = s_mixBtn = nullptr;
     s_headCol = s_meterCol = nullptr;
     s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 

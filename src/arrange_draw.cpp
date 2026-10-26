@@ -185,7 +185,7 @@ static bool block_missing(int tr, int idx)
     return false;
 }
 
-/// What this screen has to say that the bar count does not. A toast, because
+/// What this screen has to say that the position does not. A toast, because
 /// the export leaves it no row -- and only when it changes, or a line would
 /// be raised again every refresh.
 void note(const char* text)
@@ -234,11 +234,9 @@ void update_info()
                               s_regionEdit == RegionEdit::Start ? "R" : "done");
         return;
     }
-    /* The export gives this corner one dim label and the position writer
-     * already fills it with "18 bars" / "bar 2 / 4" -- its own words. So the
-     * status line speaks only where it has something that is not in the bar
-     * count: a region being edited, a clip whose file is gone, an empty song.
-     * Everything else leaves the slot to the position. */
+    /* The position is the top bar's. So the status line speaks only where it
+     * has something that is not in it: a region being edited, a clip whose
+     * file is gone, an empty song. */
     const auto& cs = song.tracks[s_selTrack].clips;
     if (s_selIndex >= 0 && s_selIndex < (int)cs.size()) {
         const auto& c = cs[s_selIndex];
@@ -249,7 +247,7 @@ void update_info()
                                   short_name(c.file).c_str(), (unsigned)(c.bar + 1), (unsigned)c.bars);
             return;
         }
-        return;   // the bar count already says this; see the note above
+        return;   // the position already says this; see the note above
     } else if (se->playEndBars() == 0) {
         note( "Empty song -- REC records the pads here, or EDIT adds a clip");
     } else {
@@ -322,7 +320,7 @@ static void rebuild_group()
     lv_group_remove_all_objs(s_encGroup);
     /* The context row's keys the open element hides are not reachable: a hidden
      * key left in the group could take the focus back and open the project list. */
-    for (lv_obj_t* k : {s_projBtn, s_followBtn, s_editBtn, s_syncBtn, s_loopBtn, s_zoomBtn})
+    for (lv_obj_t* k : {s_projBtn, s_mixBtn, s_followBtn, s_editBtn, s_syncBtn, s_loopBtn, s_zoomBtn})
         if (k && !lv_obj_has_flag(k, LV_OBJ_FLAG_HIDDEN)) lv_group_add_obj(s_encGroup, k);
     elements_group_add(s_encGroup);
     for (int i = 0; i < s_blockCount; ++i) lv_group_add_obj(s_encGroup, s_blocks[i].obj);
@@ -629,8 +627,18 @@ void rebuild_timeline()
              * freeze to play instead: silent until one is made (kit_slot()). */
             const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 1 &&
                                 song.liveRoute(t) < 0;
-            if (fz == crosspad::FreezeState::Freezing) set_text(s_headName[t], s_bouncing == t ? "BOUNCING..." : "FREEZING...");
-            else if (frozen) set_text_fmt(s_headName[t], "FRZ %s", name);
+            /* A snowflake says frozen, and a faint one freezing: the name
+             * stays readable beside it instead of losing its start to "FRZ". */
+            const bool bouncing = fz == crosspad::FreezeState::Freezing && s_bouncing == t;
+            const bool ice = (frozen || fz == crosspad::FreezeState::Freezing) && !bouncing;
+            if (s_headIce[t]) {
+                if (ice) lv_obj_remove_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
+                else     lv_obj_add_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_style_image_opa(s_headIce[t], frozen ? LV_OPA_COVER : LV_OPA_50, 0);
+            }
+            lv_obj_set_x(s_headName[t], ice ? 21 : 5);
+            lv_obj_set_width(s_headName[t], ice ? kHeadW - 26 : kHeadW - 10);
+            if (bouncing) set_text(s_headName[t], "BOUNCING...");
             else if (parked) set_text_fmt(s_headName[t], "PARKED %s", name);
             else set_text(s_headName[t], name);
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce

@@ -208,7 +208,7 @@ void make_crumb(lv_obj_t* row, int32_t w, const std::string& text, int level, bo
 
 void layout_context_row(bool inside)
 {
-    for (lv_obj_t* o : {s_projBtn, s_posLabel, s_syncBtn, s_editBtn}) {
+    for (lv_obj_t* o : {s_projBtn, s_mixBtn, s_syncBtn, s_editBtn}) {
         if (!o) continue;
         if (inside) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
