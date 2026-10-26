@@ -514,14 +514,38 @@ void request_list(Pending what, const char* title)
     s_pending = asked ? what : Pending::None;
 }
 
-/// The songs on the card, the open one marked and first to the encoder: a
-/// click on it edits it, on any other opens that one.
+/// Songs one page of the list builds: a row is a few kB of objects, and a card
+/// with fifty songs built none past the 24th -- the newest "Song N" could not
+/// be opened from here (26.10.2026). The rest is a "More ..." away.
+static constexpr size_t kSongRows = 24;
+
+static void fill_projects_from(size_t from);
+
+static void projects_page_cb(lv_event_t* e)
+{
+    const size_t from = (size_t)(intptr_t)lv_event_get_user_data(e);
+    close_overlay();
+    song_window("Songs", cancel_cb, LV_SYMBOL_PLUS " NEW", new_song_cb);
+    fill_projects_from(from);
+}
+
+/// The songs on the card, from the page the open one is on: it is marked and
+/// first to the encoder; a click on it edits it, on any other opens that one.
 void fill_projects()
 {
     s_projects = engine()->projects();
+    const auto it = std::find(s_projects.begin(), s_projects.end(), open_song_name());
+    const size_t at = it == s_projects.end() ? 0 : (size_t)(it - s_projects.begin());
+    fill_projects_from(at / kSongRows * kSongRows);
+}
+
+static void fill_projects_from(size_t from)
+{
     const std::string current = open_song_name();
     lv_obj_t* focus = nullptr;
-    for (size_t i = 0; i < s_projects.size() && i < 24; ++i) {
+    if (from > 0) list_row(LV_SYMBOL_UP "  Back ...", nullptr, projects_page_cb, (void*)(intptr_t)(from - kSongRows));
+    const size_t to = std::min(s_projects.size(), from + kSongRows);
+    for (size_t i = from; i < to; ++i) {
         const bool open = s_projects[i] == current;
         lv_obj_t* r = list_row(s_projects[i].c_str(), open ? "EDIT  " LV_SYMBOL_RIGHT : nullptr,
                                open ? song_edit_cb : project_pick_cb, (void*)(intptr_t)i);
@@ -535,6 +559,7 @@ void fill_projects()
         lv_obj_set_style_text_font(v, &lv_font_montserrat_10, 0);
         focus = r;
     }
+    if (to < s_projects.size()) list_row(LV_SYMBOL_DOWN "  More ...", nullptr, projects_page_cb, (void*)(intptr_t)to);
     if (s_projects.empty()) list_note("No songs on the card yet: + NEW starts one.", &lv_font_montserrat_14);
     if (!focus) return;
     /* Laid out first: the rows were made this tick and all still sit at the
