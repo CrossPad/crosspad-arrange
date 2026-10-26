@@ -60,14 +60,11 @@ static bool kit2_pads_wanted()
  * froze before: a tempo turned or a kit picked left every track live for good
  * (26.10.2026). PLAY, REC and DUB cancel a freeze, and the next stop finishes it
  * from the renders already on the card; a freeze that failed is tried again
- * after kRetryFirstMs, twice as long each time it fails again. A song opened
- * carries nothing over. */
-static constexpr uint32_t kRetryFirstMs = 2000;
-static constexpr uint32_t kRetryMostMs = 60000;
+ * later, later still each time (crosspad::RetryBackoff). A song opened carries
+ * nothing over. */
 static std::string s_freezeSong;
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
-static uint32_t    s_retryAt[kTracks] = {};  ///< lv_tick of the next try after a failure; 0: none
-static uint32_t    s_retryMs[kTracks] = {};  ///< the wait after the next failure
+static crosspad::RetryBackoff s_freezeRetry[kTracks];   ///< after a failed freeze, on lv_tick
 static uint8_t     s_freezeShown = 0xFF;   ///< freezeState() of each track, two bits, as last drawn
 
 static void auto_freeze(crosspad::ISongEngine* se)
@@ -84,28 +81,24 @@ static void auto_freeze(crosspad::ISongEngine* se)
     if (dir != s_freezeSong) {
         s_freezeSong = dir;
         s_freezeRunning = -1;
-        for (int t = 0; t < kTracks; ++t) s_retryAt[t] = s_retryMs[t] = 0;
+        for (auto& r : s_freezeRetry) r.reset();
     }
 
     const bool bouncing = se->bounceStatus().state == crosspad::BounceState::Running;
     const uint32_t now = lv_tick_get();
-    auto failed = [now](int t) {
-        s_retryMs[t] = s_retryMs[t] ? std::min(s_retryMs[t] * 2, kRetryMostMs) : kRetryFirstMs;
-        s_retryAt[t] = now + s_retryMs[t];
-    };
     if (s_freezeRunning >= 0 && !bouncing) {
         /* Over: made, or failed -- tried again later, each time later still. A
          * PLAY's cancel is a failure too, and the stop that follows comes after
          * the first wait anyway. */
         const int t = s_freezeRunning;
-        if (st[t] == crosspad::FreezeState::Frozen) s_retryAt[t] = s_retryMs[t] = 0;
-        else                                         failed(t);
+        if (st[t] == crosspad::FreezeState::Frozen) s_freezeRetry[t].reset();
+        else                                         s_freezeRetry[t].failed(now);
         s_freezeRunning = -1;
     }
     if (s_visible && !bouncing && !se->playing() && s_freezeRunning < 0) {
         uint8_t skip = 0;
         for (int t = 0; t < kTracks; ++t)
-            if (s_retryAt[t] && (int32_t)(now - s_retryAt[t]) < 0) skip |= (uint8_t)(1u << t);
+            if (!s_freezeRetry[t].due(now)) skip |= (uint8_t)(1u << t);
         int next = -1;
         {
             std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -113,7 +106,7 @@ static void auto_freeze(crosspad::ISongEngine* se)
         }
         if (next >= 0) {
             if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
-            else                                failed(next);
+            else                                s_freezeRetry[next].failed(now);
         }
     }
 
@@ -164,10 +157,32 @@ void sound_keeper_cb(lv_timer_t*)
         /* Asked once each time the kits have the engine back: Pitch Play and
          * the seq view give it back when they close, whatever else played it. */
         const auto st = host->state();
-        if (st == crosspad::IInstrumentHost::State::Idle && !s_soundAsked) {
-            s_soundAsked = host->requestOpen(path);
-        } else if (st == crosspad::IInstrumentHost::State::Ready) {
+        const uint32_t now = lv_tick_get();
+        if (path != s_soundPath) {
+            s_soundPath = path;
+            s_soundRetry.reset();
+            s_soundSaid = false;
+        }
+        if (st == crosspad::IInstrumentHost::State::Ready) {
             s_soundAsked = false;
+            s_soundRetry.reset();
+        } else if (st == crosspad::IInstrumentHost::State::Failed) {
+            /* It would not load -- no memory beside the kits, say: asked for again
+             * later, later still each time, and said once. A host left Failed by
+             * someone else's load is asked at once: it never turns Idle by itself,
+             * and the Pitch track stayed silent for good (26.10.2026). */
+            if (s_soundAsked) {
+                s_soundAsked = false;
+                s_soundRetry.failed(now);
+                if (!s_soundSaid) {
+                    s_soundSaid = true;
+                    note_fmt("Pitch sound did not load: %s", host->message().c_str());
+                }
+            } else if (s_soundRetry.due(now)) {
+                s_soundAsked = host->requestOpen(path);
+            }
+        } else if (st == crosspad::IInstrumentHost::State::Idle && !s_soundAsked) {
+            s_soundAsked = host->requestOpen(path);
         }
         s_soundHeld = true;
     } else {

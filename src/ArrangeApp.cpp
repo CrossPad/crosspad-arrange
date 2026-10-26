@@ -199,6 +199,9 @@ lv_timer_t* s_soundTimer   = nullptr;
 bool        s_visible      = false;   ///< this screen is the one on top
 bool        s_soundHeld    = false;   ///< the instrument was borrowed for the song
 bool        s_soundAsked   = false;   ///< a load was asked for since the host was last Idle
+std::string s_soundPath;               ///< the instrument the keeper asks for
+crosspad::RetryBackoff s_soundRetry;   ///< after a load of it failed, on lv_tick
+bool        s_soundSaid    = false;   ///< its failure was said
 bool        s_soundPads    = false;   ///< kSoundLogic is pushed
 bool        s_soundBounce  = false;   ///< a bounce of the Pitch track is capturing it
 lv_obj_t* s_tools[4] = {};

@@ -33,6 +33,7 @@
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad/song/SeqTrackSound.hpp"
 #include "crosspad/transport/SongTransport.hpp"
+#include "crosspad/util/RetryBackoff.hpp"
 #include "crosspad-gui/components/app_orchestrator.h"
 #include "crosspad-gui/components/mode_overlay.h"
 #include "crosspad-gui/components/status_bar.h"
@@ -255,6 +256,9 @@ extern lv_timer_t* s_soundTimer;
 extern bool        s_visible;
 extern bool        s_soundHeld;
 extern bool        s_soundAsked;
+extern std::string s_soundPath;
+extern crosspad::RetryBackoff s_soundRetry;
+extern bool        s_soundSaid;
 extern bool        s_soundPads;
 extern bool        s_soundBounce;
 extern lv_obj_t* s_tools[4];
