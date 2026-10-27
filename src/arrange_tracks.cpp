@@ -297,7 +297,7 @@ static void kit_picked(const std::string& path, void*)
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
         const int route = track < 0 ? song.freeSeqRoute(crosspad::SeqSource::Kit) : song.seqRoute(track);
-        second = route == 1 || song.seqTrackOnRoute(1) >= 0;
+        second = route == 1 || song.seqTrackOnRoute(1) >= 0 || song.seqTrackOnRoute(3) >= 0;
     }
     /* A toast, not this screen's note: the screen is down while the loader is up. */
     if (pitched && second) {
@@ -468,6 +468,7 @@ static void bounce_go_cb(lv_event_t*)
     /* A Pitch track is bounced through its instrument, so it has to be in:
      * notes before the bank is built would be silence in the clip. */
     bool pitch = false, second = false, parked = false;
+    int slot = -1;
     std::string ownKit;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -476,17 +477,19 @@ static void bounce_go_cb(lv_event_t*)
         second = song.seqRoute(track) == 1;
         parked = second && song.liveRoute(track) < 0;
         ownKit = song.tracks[track].kit;
+        slot = song.kitSlotOf(track);
     }
     if (parked) {
-        note("The second kit plays another track now -- ARM this one, then BOUNCE.");
+        note("The kit engines play other tracks now -- ARM this one, then BOUNCE.");
         return;
     }
     if (pitch && !crosspad::seqTrackSound().pitch.ready()) {
         note("The track's instrument is still loading -- BOUNCE again in a moment.");
         return;
     }
-    /* The second kit is bounced through its engine, which loads on its own. */
-    crosspad::ISecondKit* kit2 = crosspad::getPlatformServices().secondKit;
+    /* A kit of its own is bounced through its slot's engine, which loads on its own. */
+    const auto& ps = crosspad::getPlatformServices();
+    crosspad::ISecondKit* kit2 = slot == 1 ? ps.thirdKit : ps.secondKit;
     if (second && (!kit2 || kit2->state() != crosspad::ISecondKit::State::Ready || kit2->kit() != ownKit)) {
         note("The track's kit is still loading -- BOUNCE again in a moment.");
         return;
