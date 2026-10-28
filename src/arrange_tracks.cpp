@@ -809,6 +809,31 @@ void input_sheet(int track)
 
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
+/// The picked track one place up (-1) or down (+1) the list, its blocks,
+/// sound and levels with it (AudioSong::swapTracks()).
+static void move_track_order(int dir)
+{
+    auto* se = engine();
+    if (!se) return;
+    /* A freeze, a harvest or a take names its track by number. */
+    if (se->bounceStatus().state == crosspad::BounceState::Running || se->harvestingTrack() >= 0 ||
+        se->seqTake() != crosspad::SyncTake::None || crosspad::arrangeAudioTake().recording()) {
+        note("Not now: a track is being frozen or recorded -- in a moment.");
+        return;
+    }
+    bool moved = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        moved = se->song().swapTracks(s_selTrack, s_selTrack + dir);
+    }
+    if (!moved) return;
+    se->commit();
+    s_selTrack += dir;
+    s_selIndex = -1;
+    rebuild_timeline();
+    note_fmt("Track moved to %d.", s_selTrack + 1);
+}
+
 void track_menu()
 {
     auto* se = engine();
@@ -818,7 +843,7 @@ void track_menu()
     crosspad::StretchMode stretch = crosspad::StretchMode::Off;
     char title[32];
     std::string kit;
-    bool kitTrack = false;
+    bool kitTrack = false, canDown = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
@@ -831,6 +856,7 @@ void track_menu()
         armed = track_armed(song, s_selTrack);
         input = t.input;
         kitTrack = seq && t.source == crosspad::SeqSource::Kit;
+        canDown = s_selTrack + 1 < kTracks && song.tracks[s_selTrack + 1].inUse;
         if (kitTrack) kit = kit_name(track_kit(song, s_selTrack));
         else if (seq) kit = song.instrument.empty() ? std::string() : track_title(song, s_selTrack);
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
@@ -863,6 +889,8 @@ void track_menu()
     overlay_key(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); });
     overlay_key(LV_SYMBOL_EDIT " Rename ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); });
+    if (s_selTrack > 0) overlay_key(LV_SYMBOL_UP " Move up", [](lv_event_t*) { close_overlay(); move_track_order(-1); });
+    if (canDown) overlay_key(LV_SYMBOL_DOWN " Move down", [](lv_event_t*) { close_overlay(); move_track_order(+1); });
     overlay_key(LV_SYMBOL_TRASH " Delete ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); });
     overlay_key(LV_SYMBOL_CLOSE " Cancel", cancel_cb);
 }
