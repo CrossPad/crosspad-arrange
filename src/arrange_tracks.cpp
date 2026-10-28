@@ -340,7 +340,7 @@ static void pick_kit_for(int track, crosspad::KitList list)
     }, nullptr);
 }
 
-/// A seq track's screen, on its scene and knowing it came from here: a Pitch
+/// A seq track's screen, armed, on its scene and knowing it came from here: a Pitch
 /// track opens in Pitch Play -- the very screen the MODE map's Pitch opens,
 /// which takes the transport for this scene so REC and DUB record what is
 /// played on its keys -- and a kit track in the sequencer's seq view.
@@ -378,6 +378,9 @@ static void open_seq_track(int track)
         f.bar = picked ? t.clips[(size_t)s_selIndex].bar : playhead_bar();
     }
     if (moved) se->commit();
+    /* The pads play the armed track's sound: the screen that edits this
+     * track's notes must play its kit (or instrument), not the last one's. */
+    arm_track(track);
     if (sq) sq->selectScene(f.scene);
     const bool pitch = f.source == crosspad::SeqSource::Pitch;
     if (!crosspad_gui::mode_overlay_open_app(pitch ? "PitchPlay" : "Sequencer")) {
