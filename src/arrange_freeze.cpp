@@ -134,7 +134,8 @@ static void kit_slot(crosspad::ISongEngine* se, const crosspad::FreezeState* st,
             s_slotPrevWant = s_slotWant;
             s_slotWant = want;
         }
-        if (!crosspad::kitSlotsNext(song, st, want, s_slotPrevWant, skip, se->playing(), slots)) return;
+        const int usable = crosspad::getPlatformServices().thirdKit ? crosspad::AudioSong::kKitSlots : 1;
+        if (!crosspad::kitSlotsNext(song, st, want, s_slotPrevWant, skip, se->playing(), slots, usable)) return;
         for (int s = 0; s < crosspad::AudioSong::kKitSlots; ++s) {
             song.kitSlots[s] = slots[s];
             if (slots[s] >= 0) kits[s] = song.tracks[slots[s]].kit;
