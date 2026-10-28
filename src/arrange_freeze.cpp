@@ -179,6 +179,25 @@ static void auto_freeze(crosspad::ISongEngine* se)
     /* Playing or stopped: ARM moves while the song plays (a live set). Not
      * under a freeze or a bounce, whose engine must stay the track's. */
     if ((s_visible || seq_view_track() >= 0) && !bouncing && s_freezeRunning < 0) kit_slot(se, st, skip);
+    /* Playing: the next track a freeze would make is harvested instead --
+     * recorded out of the song as it passes, in the background, no box on
+     * the screen -- so a kit of its own gives its engine back without a stop
+     * (ISongEngine::harvestTrack()). Only a kit of its own: the pads' kit and
+     * Pitch stay loaded either way. */
+    if (se->playing() && !bouncing && s_freezeRunning < 0 && se->harvestingTrack() < 0) {
+        int next = -1;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            const auto& song = se->song();
+            uint32_t own = skip;
+            for (int t = 0; t < kTracks; ++t) {
+                const int r = song.liveRoute(t);
+                if ((r != 1 && r != 3) || !engine_holds(song, t)) own |= 1u << t;
+            }
+            next = crosspad::autoFreezeNext(song, st, own);
+        }
+        if (next >= 0 && !se->harvestTrack((uint8_t)next)) s_freezeRetry[next].failed(now);
+    }
     if (s_visible && !bouncing && !se->playing() && s_freezeRunning < 0) {
         int next = -1;
         {
