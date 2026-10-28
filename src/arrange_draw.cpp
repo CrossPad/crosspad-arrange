@@ -303,10 +303,24 @@ static void seq_lane_cb(lv_event_t* e)
     }, (void*)(intptr_t)track);
 }
 
+/* Where the finger went down on a block: a release far from it was a drag
+ * with nothing to scroll (the whole song in view), not a tap on the block. */
+static lv_point_t s_blockPressAt{};
+
 static void block_cb(lv_event_t* e)
 {
     const int k = (int)(intptr_t)lv_event_get_user_data(e);
     if (k < 0 || k >= s_blockCount) return;
+    lv_indev_t* in = lv_indev_active();
+    if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+        if (in) lv_indev_get_point(in, &s_blockPressAt);
+        return;
+    }
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED && in && lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) {
+        lv_point_t p;
+        lv_indev_get_point(in, &p);
+        if (std::abs(p.x - s_blockPressAt.x) > 12 || std::abs(p.y - s_blockPressAt.y) > 12) return;
+    }
     select(s_blocks[k].track, s_blocks[k].index);
     if (s_blocks[k].obj) lv_obj_scroll_to_view(s_blocks[k].obj, LV_ANIM_ON);
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) enter_tools();
@@ -360,23 +374,82 @@ void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
     set_ink(lv_obj_get_child(b, 0), on ? kInk : kDim);
 }
 
-/// A tap on the ruler: the playhead to that bar (rebuild_timeline()).
-static void ruler_cb(lv_event_t* e)
+/* The ruler held, then dragged: a loop region from the bar it was held on
+ * to the bar under the finger, drawn as it grows and set, looping, on the
+ * release. */
+static lv_obj_t* s_rulerBand = nullptr;
+static int32_t   s_rulerFrom = -1;     ///< the bar held on; -1 while no region is being drawn
+static int32_t   s_rulerTo = -1;
+
+/// The bar under the finger on the ruler, or -1.
+static int32_t ruler_bar(lv_event_t* e)
 {
-    auto* se = engine();
     lv_indev_t* in = lv_indev_active();
-    if (!se || !in || !s_timeline) return;
+    if (!in || s_pxPerBar <= 0) return -1;
     lv_point_t p;
     lv_indev_get_point(in, &p);
     lv_area_t a;
     lv_obj_get_coords((lv_obj_t*)lv_event_get_target(e), &a);
     const int32_t x = p.x - a.x1;
-    if (x < 0 || s_pxPerBar <= 0) return;
-    const uint32_t bar = (uint32_t)(x / s_pxPerBar);
+    return x < 0 ? -1 : x / s_pxPerBar;
+}
+
+/// A tap on the ruler: the playhead to that bar. Held and dragged: a loop
+/// region (rebuild_timeline()).
+static void ruler_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se || !s_timeline) return;
+    const lv_event_code_t code = lv_event_get_code(e);
+    const int32_t bar = ruler_bar(e);
+    if (code == LV_EVENT_LONG_PRESSED) {
+        if (bar < 0) return;
+        s_rulerFrom = s_rulerTo = bar;
+        lv_obj_remove_flag((lv_obj_t*)lv_event_get_target(e), LV_OBJ_FLAG_SCROLL_CHAIN);   // the lanes stay put
+        s_rulerBand = lv_obj_create(s_timeline);
+        lv_obj_remove_style_all(s_rulerBand);
+        lv_obj_set_style_bg_color(s_rulerBand, kAccent, 0);
+        lv_obj_set_style_bg_opa(s_rulerBand, LV_OPA_50, 0);
+        lv_obj_remove_flag(s_rulerBand, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(s_rulerBand, bar * s_pxPerBar, 0);
+        lv_obj_set_size(s_rulerBand, s_pxPerBar, kRulerH);
+        note_fmt("Loop region: bar %d", (int)bar + 1);
+        return;
+    }
+    if (code == LV_EVENT_PRESSING) {
+        if (s_rulerFrom < 0 || bar < 0 || bar == s_rulerTo || !s_rulerBand) return;
+        s_rulerTo = bar;
+        const int32_t a = std::min(s_rulerFrom, s_rulerTo), b = std::max(s_rulerFrom, s_rulerTo) + 1;
+        lv_obj_set_pos(s_rulerBand, a * s_pxPerBar, 0);
+        lv_obj_set_width(s_rulerBand, (b - a) * s_pxPerBar);
+        note_fmt("Loop region: bars %d - %d", (int)a + 1, (int)b);
+        return;
+    }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_rulerFrom < 0) return;
+        const uint32_t a = (uint32_t)std::min(s_rulerFrom, s_rulerTo), b = (uint32_t)std::max(s_rulerFrom, s_rulerTo) + 1;
+        s_rulerFrom = s_rulerTo = -1;
+        s_rulerBand = nullptr;           // the rebuild deletes it with the lanes
+        if (code == LV_EVENT_PRESS_LOST) { rebuild_timeline(); return; }
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            auto& song = se->song();
+            song.loopStart = a;
+            song.loopEnd = b;
+            song.loop = true;
+        }
+        se->commit();
+        /* Next turn of the loop: the rebuild deletes the ruler whose event this is. */
+        lv_async_call([](void*) { rebuild_timeline(); sync_transport(); update_info(); }, nullptr);
+        note_fmt("Looping bars %u - %u.", (unsigned)a + 1, (unsigned)b);
+        return;
+    }
+    /* CLICKED: a tap -- but not the release of a region just drawn. */
+    if (bar < 0) return;
     if (se->playing() && se->seqTake() == crosspad::SyncTake::None && !crosspad::arrangeAudioTake().recording()) {
-        se->play(bar);
+        se->play((uint32_t)bar);
     } else if (!se->playing()) {
-        crosspad::songTransport().setStartBar(bar);
+        crosspad::songTransport().setStartBar((uint32_t)bar);
     }
 }
 
@@ -384,6 +457,9 @@ void rebuild_timeline()
 {
     auto* se = engine();
     if (!se || !s_timeline) return;
+    /* The lanes go, the ruler and a region being drawn on it with them. */
+    s_rulerBand = nullptr;
+    s_rulerFrom = s_rulerTo = -1;
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     /* A seq track holds no audio -- the sequencer plays its scene, its
      * blocks have no file. So a seq track that does hold a file is a bounce
@@ -526,6 +602,7 @@ void rebuild_timeline()
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
+            lv_obj_add_event_cb(o, block_cb, LV_EVENT_PRESSED, (void*)(intptr_t)s_blockCount);
             for (lv_event_code_t ev : {LV_EVENT_LONG_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST})
                 lv_obj_add_event_cb(o, block_drag_cb, ev, (void*)(intptr_t)s_blockCount);
             /* An element has no waveform and no notes of its own to draw
@@ -630,7 +707,10 @@ void rebuild_timeline()
         lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(r, LV_OBJ_FLAG_SCROLL_CHAIN);
         lv_group_remove_obj(r);
-        lv_obj_add_event_cb(r, ruler_cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_PRESS_LOCK);
+        for (lv_event_code_t ev : {LV_EVENT_SHORT_CLICKED, LV_EVENT_LONG_PRESSED, LV_EVENT_PRESSING,
+                                   LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST})
+            lv_obj_add_event_cb(r, ruler_cb, ev, nullptr);
     }
 
     s_playhead = lv_obj_create(s_timeline);

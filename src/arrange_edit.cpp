@@ -693,6 +693,36 @@ static void region_dup_cb(lv_event_t*)
     });
 }
 
+/// Room the length of the region before it: everything from its start on
+/// moves later, the region with it.
+static void region_insert_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        const uint32_t w = song.loopEnd - song.loopStart;
+        song.insertBars(song.loopStart, w, prepare_bar_edit(song));
+        song.loopStart += w;
+        song.loopEnd += w;
+    });
+    note("Empty bars in; the region moved on with the song.");
+}
+
+/// The region out of the song, and what came after it closed up.
+static void region_delete_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        song.deleteBars(song.loopStart, song.loopEnd, prepare_bar_edit(song));
+    });
+    note("Bars deleted -- hold EDIT to undo.");
+}
+
+/// Four empty bars at the playhead (no region to size them).
+static void insert_bars_cb(lv_event_t*)
+{
+    const uint32_t at = playhead_bar();
+    region_edit([at](crosspad::AudioSong& song) { song.insertBars(at, 4, prepare_bar_edit(song)); });
+    note_fmt("4 empty bars at bar %u.", (unsigned)at + 1);
+}
+
 /// The bar the playhead is on: where the song is while it plays, where PLAY
 /// starts while it is stopped (the top bar's position turns it).
 uint32_t playhead_bar()
@@ -945,6 +975,11 @@ void edit_cb(lv_event_t*)
             overlay_item(buf, region_paste_cb, nullptr);
         }
         overlay_item(LV_SYMBOL_PLUS " Duplicate the region  x2", region_dup_cb, nullptr);
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_PLUS " Insert %u empty bars at the region", (unsigned)(b - a));
+        overlay_item(buf, region_insert_cb, nullptr);
+        overlay_item(LV_SYMBOL_CUT " Delete the region, close the gap", region_delete_cb, nullptr);
+    } else {
+        overlay_item(LV_SYMBOL_PLUS " Insert 4 empty bars at the playhead", insert_bars_cb, nullptr);
     }
     overlay_item(LV_SYMBOL_SHUFFLE " Merge tracks ...", merge_tracks_cb, nullptr);
     overlay_item(LV_SYMBOL_SHUFFLE " Merge all tracks into one", merge_all_cb, nullptr);
