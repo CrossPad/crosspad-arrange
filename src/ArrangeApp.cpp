@@ -250,7 +250,7 @@ Block     s_blocks[kMaxBlocks];
 int       s_blockCount = 0;
 static lv_timer_t* s_timer = nullptr;
 
-int      s_zoom = 1;                // index into kZoomPx; kept across visits
+int      s_zoom = 2;                // index into kZoomPx (s_pxPerBar's); kept across visits
 int32_t  s_pxPerBar = kZoomPx[2];
 int      s_selTrack = 0;
 int      s_selIndex = -1;
