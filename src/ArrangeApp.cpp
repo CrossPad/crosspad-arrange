@@ -304,6 +304,7 @@ lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
 bool      s_exportWav = false;
+uint32_t  s_exportAskedMs = 0;
 bool      s_editing = false;
 EditKind  s_editKind = EditKind::Tempo;
 /* The song window's tempo row, the MIX window's dB and M; they live and die
@@ -915,6 +916,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
     for (auto& p : s_headProg) p = nullptr;
+    drag_forget();
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
     for (auto& w : s_meterWell) w = nullptr;

@@ -856,7 +856,14 @@ static void duplicate_track()
         dst.volume = src.volume;
         dst.pan = src.pan;
         if (audio) { dst.input = src.input; dst.stretch = src.stretch; }
-        dst.name = (title + " 2").substr(0, 16);
+        /* Cut on a letter, not a byte (a Polish kit name), and " 2" kept. */
+        std::string base = title;
+        if (base.size() > 14) {
+            size_t cut = 14;
+            while (cut > 0 && ((uint8_t)base[cut] & 0xC0) == 0x80) --cut;
+            base.erase(cut);
+        }
+        dst.name = base + " 2";
         song.armed = armed;
     }
     se->commit();

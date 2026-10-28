@@ -430,7 +430,10 @@ static void ruler_cb(lv_event_t* e)
         const uint32_t a = (uint32_t)std::min(s_rulerFrom, s_rulerTo), b = (uint32_t)std::max(s_rulerFrom, s_rulerTo) + 1;
         s_rulerFrom = s_rulerTo = -1;
         s_rulerBand = nullptr;           // the rebuild deletes it with the lanes
-        if (code == LV_EVENT_PRESS_LOST) { rebuild_timeline(); return; }
+        if (code == LV_EVENT_PRESS_LOST) {
+            lv_async_call([](void*) { rebuild_timeline(); }, nullptr);   // not from inside the ruler's own event
+            return;
+        }
         {
             std::lock_guard<std::recursive_mutex> l(se->songMutex());
             auto& song = se->song();
@@ -460,6 +463,7 @@ void rebuild_timeline()
     /* The lanes go, the ruler and a region being drawn on it with them. */
     s_rulerBand = nullptr;
     s_rulerFrom = s_rulerTo = -1;
+    drag_forget();
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     /* A seq track holds no audio -- the sequencer plays its scene, its
      * blocks have no file. So a seq track that does hold a file is a bounce

@@ -286,6 +286,7 @@ extern bool      s_opening;
 extern bool      s_editing;
 /// A mixdown asked for: its seq tracks are frozen first (auto_freeze()), then it is written.
 extern bool      s_exportWav;
+extern uint32_t  s_exportAskedMs;   ///< lv_tick_get() when the mixdown was asked for
 extern EditKind  s_editKind;
 extern lv_obj_t* s_tempoItem;
 extern lv_obj_t* s_songList;
@@ -348,6 +349,8 @@ int move_target(const crosspad::AudioSong& song, int from, int dir);
 void move_cb(lv_event_t* e);
 /// A block held and dragged to another bar or lane (registered on every block).
 void block_drag_cb(lv_event_t* e);
+/// A drag in hand is let go: the timeline it was on is being rebuilt or closed.
+void drag_forget();
 void dup_cb(lv_event_t*);
 void del_cb(lv_event_t*);
 bool back_handler(lv_obj_t*);

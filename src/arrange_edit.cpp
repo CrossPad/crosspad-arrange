@@ -295,9 +295,18 @@ static struct {
     lv_obj_t*  obj = nullptr;
     lv_point_t start{};
     int32_t    x0 = 0, y0 = 0;
-    int        bar0 = 0, track0 = 0, used = 1;
-    int        dBars = 0, dLanes = 0;
+    int        bar0 = 0, track0 = 0;
+    int        dBars = 0;
+    int        land = 0;                  ///< the lane it would land on
+    std::vector<int> lanes;               ///< the lanes it can land on (move_target()), its own first
 } s_drag;
+
+void drag_forget()
+{
+    s_drag.obj = nullptr;
+    s_drag.dBars = 0;
+    s_drag.lanes.clear();
+}
 
 void block_drag_cb(lv_event_t* e)
 {
@@ -314,12 +323,18 @@ void block_drag_cb(lv_event_t* e)
         lv_indev_get_point(in, &s_drag.start);
         s_drag.x0 = lv_obj_get_x(o);
         s_drag.y0 = lv_obj_get_y(o);
-        s_drag.track0 = s_blocks[k].track;
+        s_drag.track0 = s_drag.land = s_blocks[k].track;
         {
             std::lock_guard<std::recursive_mutex> l(se->songMutex());
-            const auto& cs = se->song().tracks[s_selTrack].clips;
+            const auto& song = se->song();
+            const auto& cs = song.tracks[s_selTrack].clips;
             s_drag.bar0 = s_selIndex >= 0 && s_selIndex < (int)cs.size() ? (int)cs[(size_t)s_selIndex].bar : 0;
-            s_drag.used = std::max(1, se->song().usedTracks());
+            /* Only the lanes MOVE would take it to: a lane of another kind
+             * is passed over, and the preview must not promise one. */
+            s_drag.lanes.push_back(s_drag.track0);
+            for (int dir : {-1, +1})
+                for (int t = move_target(song, s_drag.track0, dir); t >= 0; t = move_target(song, t, dir))
+                    s_drag.lanes.push_back(t);
         }
         /* The lanes must not scroll under the finger that carries the block. */
         lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLL_CHAIN);
@@ -330,30 +345,35 @@ void block_drag_cb(lv_event_t* e)
         lv_obj_move_foreground(o);
         return;
     }
-    if (o != s_drag.obj || !in) return;
+    if (!s_drag.obj || o != s_drag.obj || !in) return;
     if (code == LV_EVENT_PRESSING) {
         lv_point_t p;
         lv_indev_get_point(in, &p);
         const int32_t pitch = kLaneH + kLaneGap;
         const int32_t dx = p.x - s_drag.start.x, dy = p.y - s_drag.start.y;
         int db = (int)((dx + (dx >= 0 ? s_pxPerBar / 2 : -s_pxPerBar / 2)) / std::max<int32_t>(1, s_pxPerBar));
-        int dl = (int)((dy + (dy >= 0 ? pitch / 2 : -pitch / 2)) / pitch);
         db = std::max(db, -s_drag.bar0);
-        dl = std::clamp(dl, -s_drag.track0, s_drag.used - 1 - s_drag.track0);
-        if (db == s_drag.dBars && dl == s_drag.dLanes) return;
+        /* The lane it can land on nearest the finger. */
+        const int want = s_drag.track0 + (int)((dy + (dy >= 0 ? pitch / 2 : -pitch / 2)) / pitch);
+        int land = s_drag.track0;
+        for (int t : s_drag.lanes)
+            if (std::abs(t - want) < std::abs(land - want)) land = t;
+        if (db == s_drag.dBars && land == s_drag.land) return;
         s_drag.dBars = db;
-        s_drag.dLanes = dl;
-        lv_obj_set_pos(o, s_drag.x0 + db * s_pxPerBar, s_drag.y0 + dl * pitch);
+        s_drag.land = land;
+        lv_obj_set_pos(o, s_drag.x0 + db * s_pxPerBar, s_drag.y0 + (land - s_drag.track0) * pitch);
         return;
     }
     if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
-    s_drag.obj = nullptr;
     /* Landed on the next turn of the LVGL loop: the move rebuilds the
      * timeline, and with it the block whose event this is. */
-    static int s_landBars = 0, s_landLanes = 0;
+    static int s_landBars = 0, s_landTrack = -1;
     s_landBars = code == LV_EVENT_RELEASED ? s_drag.dBars : 0;
-    s_landLanes = code == LV_EVENT_RELEASED ? s_drag.dLanes : 0;
-    lv_async_call([](void*) {
+    s_landTrack = code == LV_EVENT_RELEASED ? s_drag.land : s_drag.track0;
+    const int from = s_drag.track0;
+    drag_forget();
+    lv_async_call([](void* p) {
+        const int start = (int)(intptr_t)p;
         if (s_landBars) {
             const int d = s_landBars;
             edit_selected([d](crosspad::AudioSong&, crosspad::SongClip& c) {
@@ -361,10 +381,15 @@ void block_drag_cb(lv_event_t* e)
                 return c;
             });
         }
-        for (int i = 0; i < std::abs(s_landLanes); ++i) move_track(s_landLanes > 0 ? 1 : -1);
-        if (!s_landBars && !s_landLanes) rebuild_timeline();
+        /* Step by step through the lanes MOVE takes it to, as many as the drop asked. */
+        for (int i = 0; i < kTracks && s_selTrack != s_landTrack; ++i) {
+            const int was = s_selTrack;
+            move_track(s_landTrack > s_selTrack ? 1 : -1);
+            if (s_selTrack == was) break;
+        }
+        if (!s_landBars && s_landTrack == start) rebuild_timeline();
         else leave_tools();
-    }, nullptr);
+    }, (void*)(intptr_t)from);
 }
 
 /// A copy straight after the block, which is how a part is repeated.

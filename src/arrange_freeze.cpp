@@ -84,6 +84,8 @@ static crosspad::ISecondKit* slot_engine(int slot)
  * later, later still each time (crosspad::RetryBackoff). A song opened carries
  * nothing over. */
 static std::string s_freezeSong;
+/// How long a mixdown waits for a kit track's kit to come into a slot.
+constexpr uint32_t kExportWaitMs = 20000;
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
 static crosspad::RetryBackoff s_freezeRetry[kTracks];   ///< after a failed freeze, on lv_tick
 static uint64_t    s_freezeShown = UINT64_MAX;   ///< freezeState() of each track, two bits, as last drawn
@@ -169,6 +171,10 @@ static void auto_freeze(crosspad::ISongEngine* se)
     if (dir != s_freezeSong) {
         s_freezeSong = dir;
         s_freezeRunning = -1;
+        if (s_exportWav) {
+            s_exportWav = false;          // asked of the song that was open, not of this one
+            note("No mix: another song was opened.");
+        }
         for (auto& r : s_freezeRetry) r.reset();
     }
 
@@ -213,6 +219,7 @@ static void auto_freeze(crosspad::ISongEngine* se)
     if (s_exportWav && !bouncing && !se->playing() && s_freezeRunning < 0 &&
         se->editState() != crosspad::SongOpState::Busy) {
         int next = -1, stuck = -1;
+        bool waiting = false;
         {
             std::lock_guard<std::recursive_mutex> l(se->songMutex());
             const auto& song = se->song();
@@ -220,16 +227,25 @@ static void auto_freeze(crosspad::ISongEngine* se)
                 const auto& tr = song.tracks[t];
                 if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq || song.silenced(t) || song.seqPlaysNothing(t) ||
                     st[t] == crosspad::FreezeState::Frozen) continue;
+                /* Its sound must be in an engine first, or the freeze is of
+                 * silence or of another kit: waited for, as kit_slot() hands
+                 * the slots out to the tracks that need them. */
+                if (song.liveRoute(t) < 0 || !engine_holds(song, t)) { waiting = true; continue; }
                 if (skip & (1u << t)) stuck = t;
                 else                  next = t;
             }
         }
-        if (next >= 0) {
+        const bool slotComing = next < 0 && waiting && now - s_exportAskedMs < kExportWaitMs;
+        if (next < 0 && waiting && !slotComing) stuck = 0;
+        if (slotComing) {
+            /* a slot on its way: asked again on the next tick */
+        } else if (next >= 0) {
             if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
             else                                s_freezeRetry[next].failed(now);
         } else if (stuck >= 0) {
             s_exportWav = false;
-            note_fmt("No mix: track %d would not freeze (its sound is not loaded?).", stuck + 1);
+            if (waiting) note("No mix: a kit track's kit did not load in time -- try again.");
+            else         note_fmt("No mix: track %d would not freeze (its sound is not loaded?).", stuck + 1);
         } else {
             s_exportWav = false;
             if (se->requestExportWav()) {

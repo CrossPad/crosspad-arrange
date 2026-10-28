@@ -432,6 +432,7 @@ static void export_wav_cb(lv_event_t*)
     if (!se) return;
     if (se->playing()) crosspad::songTransport().stop();
     s_exportWav = true;
+    s_exportAskedMs = lv_tick_get();
     note("Mixing the song down -- frozen first where it is not ...");
 }
 
