@@ -393,8 +393,10 @@ void export_done(bool ok)
         if (!report.empty()) note(report[0].c_str());
         return;
     }
-    song_window("Ableton Live", song_edit_cb);
-    list_note(ok ? LV_SYMBOL_OK "  Live Set written" : LV_SYMBOL_WARNING "  No Live Set written",
+    const bool wav = s_editKind == EditKind::ExportWav;
+    song_window(wav ? "Mixdown" : "Ableton Live", song_edit_cb);
+    list_note(ok ? (wav ? LV_SYMBOL_OK "  Mix written" : LV_SYMBOL_OK "  Live Set written")
+                 : (wav ? LV_SYMBOL_WARNING "  No mix written" : LV_SYMBOL_WARNING "  No Live Set written"),
               &lv_font_montserrat_14, ok ? kAccent : kMute);
     for (size_t i = 0; i < report.size() && i < 6; ++i) {
         list_note(report[i].c_str(), i ? &lv_font_montserrat_10 : &lv_font_montserrat_14, i ? kDim : kText);
@@ -402,7 +404,8 @@ void export_done(bool ok)
     if (report.size() > 6) {
         list_note(("... and " + std::to_string(report.size() - 6) + " more").c_str());
     }
-    if (ok) list_note("Open the .als on the card in Live 12, or copy the song's folder off it first.");
+    if (ok && wav)  list_note("Beside the song on the card: copy it off, or over USB (Settings -> USB -> SD card as USB drive).");
+    else if (ok)    list_note("Open the .als on the card in Live 12, or copy the song's folder off it first.");
     lv_obj_t* done = list_row(LV_SYMBOL_OK "  OK", nullptr, [](lv_event_t*) { close_overlay(); });
     emphasise_row(done, kAccent);
 #ifdef ARR_USE_ENCODER
@@ -418,6 +421,18 @@ static void export_cb(lv_event_t*)
     s_editing = true;
     s_editKind = EditKind::Export;
     note("Writing the Ableton Live Set ...");
+}
+
+/// The song mixed down to a WAV beside it: what is not frozen is frozen
+/// first, in the background (auto_freeze()), then the mix is written.
+static void export_wav_cb(lv_event_t*)
+{
+    close_overlay();
+    auto* se = engine();
+    if (!se) return;
+    if (se->playing()) crosspad::songTransport().stop();
+    s_exportWav = true;
+    note("Mixing the song down -- frozen first where it is not ...");
 }
 
 /// The open song's settings, a row each: tempo (click, turn, click), name,
@@ -446,6 +461,7 @@ static void song_edit_cb(lv_event_t*)
     lv_obj_add_event_cb(s_tempoItem, tempo_cb, LV_EVENT_CLICKED, nullptr);
     show_tempo();
     list_row("Name", (name + "  " LV_SYMBOL_RIGHT).c_str(), rename_cb);
+    list_row("Export mix to WAV", ".wav  " LV_SYMBOL_RIGHT, export_wav_cb);
     list_row("Export to Ableton Live", ".als  " LV_SYMBOL_RIGHT, export_cb);
     lv_obj_t* del = list_row("Delete song", LV_SYMBOL_RIGHT, delete_cb);
     lv_obj_set_style_text_color(del, kMute, 0);

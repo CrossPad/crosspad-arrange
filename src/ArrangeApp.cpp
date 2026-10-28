@@ -289,6 +289,7 @@ uint32_t  s_pendingGen = 0;
 lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
+bool      s_exportWav = false;
 bool      s_editing = false;
 EditKind  s_editKind = EditKind::Tempo;
 /* The song window's tempo row, the MIX window's dB and M; they live and die

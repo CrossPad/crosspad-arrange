@@ -197,13 +197,16 @@ void tick_cb(lv_timer_t*)
             if (!ok) note( "Not merged: no card, nothing audible on those tracks, or the card is full.");
         }
     }
+    if (s_editing && s_editKind == EditKind::ExportWav && se->editState() == crosspad::SongOpState::Busy) {
+        note_fmt("Writing the mix ... %u%%", (unsigned)se->editProgress());
+    }
     if (s_editing && se->editState() != crosspad::SongOpState::Busy) {
         s_editing = false;
         const bool failed = se->editState() == crosspad::SongOpState::Failed;
         show_tempo();                 // the tempo row, if its window is still open
         rebuild_timeline();
         update_info();
-        if (s_editKind == EditKind::Export) export_done(!failed);
+        if (s_editKind == EditKind::Export || s_editKind == EditKind::ExportWav) export_done(!failed);
         else if (s_editKind == EditKind::ElementDelete) element_delete_done(!failed);
         else if (failed && s_editKind == EditKind::Rename) rename_failed();
         else if (failed && s_editKind == EditKind::Delete) {

@@ -208,6 +208,37 @@ static void auto_freeze(crosspad::ISongEngine* se)
         }
         if (next >= 0 && !se->harvestTrack((uint8_t)next)) s_freezeRetry[next].failed(now);
     }
+    /* A mixdown asked for: every seq track that is heard frozen -- the armed
+     * one too, which auto-freeze leaves live -- then the mix is written. */
+    if (s_exportWav && !bouncing && !se->playing() && s_freezeRunning < 0 &&
+        se->editState() != crosspad::SongOpState::Busy) {
+        int next = -1, stuck = -1;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            const auto& song = se->song();
+            for (int t = 0; t < kTracks && next < 0; ++t) {
+                const auto& tr = song.tracks[t];
+                if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq || song.silenced(t) || song.seqPlaysNothing(t) ||
+                    st[t] == crosspad::FreezeState::Frozen) continue;
+                if (skip & (1u << t)) stuck = t;
+                else                  next = t;
+            }
+        }
+        if (next >= 0) {
+            if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
+            else                                s_freezeRetry[next].failed(now);
+        } else if (stuck >= 0) {
+            s_exportWav = false;
+            note_fmt("No mix: track %d would not freeze (its sound is not loaded?).", stuck + 1);
+        } else {
+            s_exportWav = false;
+            if (se->requestExportWav()) {
+                s_editing = true;
+                s_editKind = EditKind::ExportWav;
+                note("Writing the mix ...");
+            }
+        }
+    }
     if (s_visible && !bouncing && !se->playing() && s_freezeRunning < 0) {
         int next = -1;
         {

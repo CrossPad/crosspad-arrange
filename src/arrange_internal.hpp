@@ -208,7 +208,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 enum class Pending : uint8_t { None, Projects, Clips, Elements, Songs };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
-enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ElementDelete };
+enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ExportWav, ElementDelete };
 
 /* MOVE's axis while it is turned: first click along the bars, second across
  * the tracks, third done. Arrows beside the block show which, and a finger
@@ -284,6 +284,8 @@ extern uint32_t  s_pendingGen;
 extern lv_obj_t* s_loading;
 extern bool      s_opening;
 extern bool      s_editing;
+/// A mixdown asked for: its seq tracks are frozen first (auto_freeze()), then it is written.
+extern bool      s_exportWav;
 extern EditKind  s_editKind;
 extern lv_obj_t* s_tempoItem;
 extern lv_obj_t* s_songList;
