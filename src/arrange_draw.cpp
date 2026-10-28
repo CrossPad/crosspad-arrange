@@ -667,14 +667,16 @@ void rebuild_timeline()
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
-            /* A kit of its own neither kit engine is playing, and no freeze
-             * to play instead: silent until one is made (kit_slot()). */
-            const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 1 &&
-                                song.liveRoute(t) < 0;
+            /* A kit of its own neither kit engine is playing: its last freeze
+             * stands in (faint snowflake), and with none it is silent until
+             * one is made (kit_slot()). */
+            const bool noEngine = song.seqRoute(t) == 1 && song.liveRoute(t) < 0 && song.armed != t;
+            const bool standIn = noEngine && fz == crosspad::FreezeState::Stale;
+            const bool parked = noEngine && fz == crosspad::FreezeState::None;
             /* A snowflake says frozen, and a faint one freezing: the name
              * stays readable beside it instead of losing its start to "FRZ". */
             const bool bouncing = fz == crosspad::FreezeState::Freezing && s_bouncing == t;
-            const bool ice = (frozen || fz == crosspad::FreezeState::Freezing) && !bouncing;
+            const bool ice = (frozen || standIn || fz == crosspad::FreezeState::Freezing) && !bouncing;
             if (s_headIce[t]) {
                 if (ice) lv_obj_remove_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
                 else     lv_obj_add_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
