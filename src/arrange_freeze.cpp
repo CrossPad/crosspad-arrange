@@ -232,22 +232,20 @@ static void auto_freeze(crosspad::ISongEngine* se)
     }
 }
 
-/// The processing box's text for a freeze Arrange started, while it runs:
-/// the track, the renders through of those its plan needs (core finds the
-/// ones it has on the card and renders only the rest) and how far the whole
-/// is. False when no freeze of ours runs.
-bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap)
+/// A freeze Arrange started, while it runs: the track and how far the whole
+/// is -- the renders through of those its plan needs (core finds the ones it
+/// has on the card and renders only the rest). False when no freeze of ours
+/// runs.
+bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct)
 {
     /* A bounce from BOUNCE is a freeze whose renders become the track's
-     * audio (core 2.14): the same box, the same count. */
-    const int track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
+     * audio (core 2.14): the same count. */
+    track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
     if (!se || track < 0 || se->freezeState((uint8_t)track) != crosspad::FreezeState::Freezing) return false;
     const crosspad::BounceStatus st = se->bounceStatus();
     const uint32_t pieces = st.pieces ? st.pieces : 1;
     const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
-    const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
-    std::snprintf(buf, cap, "%s TRACK %d\nrender %u of %u  -  %u%%", s_bouncing >= 0 ? "BOUNCING" : "FREEZING",
-                  track + 1, (unsigned)std::min<uint32_t>(st.piecesDone + 1, pieces), (unsigned)pieces, pct);
+    pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
     return true;
 }
 

@@ -234,6 +234,7 @@ extern lv_obj_t* s_heads[kTracks];
 extern lv_obj_t* s_headNum[kTracks];
 extern lv_obj_t* s_headName[kTracks];
 extern lv_obj_t* s_headIce[kTracks];   ///< a frozen track's snowflake, before its name
+extern lv_obj_t* s_headProg[kTracks];  ///< a freeze or bounce running: how far, along the header's foot
 extern lv_obj_t* s_headMute[kTracks];
 extern lv_obj_t* s_headSolo[kTracks];
 extern lv_obj_t* s_headArm[kTracks];
@@ -385,7 +386,8 @@ void mix_forget();
 void mix_meters(crosspad::ISongEngine* se);
 void style_toggle(lv_obj_t* b, bool on, lv_color_t col);
 void mix_cb(lv_event_t*);
-bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
+/// The track a freeze or bounce of ours is rendering and how far it is (0..100).
+bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct);
 void sound_keeper_cb(lv_timer_t*);
 void sound_keeper_start();
 void request_list(Pending what, const char* title);

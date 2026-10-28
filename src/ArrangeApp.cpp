@@ -166,6 +166,7 @@ lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headIce[kTracks] = {};
+lv_obj_t* s_headProg[kTracks] = {};
 
 /* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
  * the image's recolour (kIce), so no font has to carry the glyph. */
@@ -540,6 +541,20 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(ice, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(ice, LV_OBJ_FLAG_HIDDEN);
         s_headIce[t] = ice;
+        /* A freeze or bounce of this track running: a line along the
+         * header's foot grows with it. Nothing over the lanes -- the track
+         * plays live meanwhile, and a box there took the taps meant for the
+         * blocks under it. */
+        lv_obj_t* prog = lv_obj_create(h);
+        lv_obj_remove_style_all(prog);
+        lv_obj_set_pos(prog, 2, kLaneH - 3);
+        lv_obj_set_size(prog, 0, 2);
+        lv_obj_set_style_radius(prog, 1, 0);
+        lv_obj_set_style_bg_color(prog, kIce, 0);
+        lv_obj_set_style_bg_opa(prog, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(prog, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(prog, LV_OBJ_FLAG_HIDDEN);
+        s_headProg[t] = prog;
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -863,6 +878,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headNum) l = nullptr;
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
+    for (auto& p : s_headProg) p = nullptr;
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
     for (auto& w : s_meterWell) w = nullptr;

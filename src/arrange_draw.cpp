@@ -360,6 +360,26 @@ void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
     set_ink(lv_obj_get_child(b, 0), on ? kInk : kDim);
 }
 
+/// A tap on the ruler: the playhead to that bar (rebuild_timeline()).
+static void ruler_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    lv_indev_t* in = lv_indev_active();
+    if (!se || !in || !s_timeline) return;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    lv_area_t a;
+    lv_obj_get_coords((lv_obj_t*)lv_event_get_target(e), &a);
+    const int32_t x = p.x - a.x1;
+    if (x < 0 || s_pxPerBar <= 0) return;
+    const uint32_t bar = (uint32_t)(x / s_pxPerBar);
+    if (se->playing() && se->seqTake() == crosspad::SyncTake::None && !crosspad::arrangeAudioTake().recording()) {
+        se->play(bar);
+    } else if (!se->playing()) {
+        crosspad::songTransport().setStartBar(bar);
+    }
+}
+
 void rebuild_timeline()
 {
     auto* se = engine();
@@ -484,6 +504,11 @@ void rebuild_timeline()
         }
 
         const auto& cs = song.tracks[tr].clips;
+        /* A seq track's takes are lettered in the order they first appear:
+         * a DUP shares its notes (copy-on-write), so every copy of a part
+         * carries the part's letter and the song's form reads off the lane --
+         * A A B A. */
+        std::vector<const void*> parts;
         for (int i = 0; i < (int)cs.size() && i < perTrack && s_blockCount < kMaxBlocks; ++i) {
             const auto& c = cs[i];
             lv_obj_t* o = lv_obj_create(s_timeline);
@@ -516,7 +541,13 @@ void rebuild_timeline()
             /* A block of its own notes is the seq track's part; one that
              * plays the scene says which; an element's is styled with its Block. */
             if (!c.isElement()) {
-                if (seq && c.notes) lv_label_set_text(lb, "SEQ");
+                if (seq && c.notes) {
+                    auto it = std::find(parts.begin(), parts.end(), (const void*)c.notes.get());
+                    const size_t n = (size_t)(it - parts.begin());
+                    if (it == parts.end()) parts.push_back(c.notes.get());
+                    if (n < 26) set_text_fmt(lb, "%c", 'A' + (int)n);
+                    else        set_text_fmt(lb, "%c%u", 'A' + (int)(n % 26), (unsigned)(n / 26));
+                }
                 else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
                 else                lv_label_set_text(lb, short_name(c.file).c_str());
             }
@@ -582,6 +613,22 @@ void rebuild_timeline()
         band(x1, 0, x2 - x1, kRulerH, kAccent, song.loop ? LV_OPA_70 : LV_OPA_30);
         band(x1 - 1, 0, 2, h, s_regionEdit == RegionEdit::Start ? kHead : kAccent, LV_OPA_COVER);
         band(x2 - 1, 0, 2, h, s_regionEdit == RegionEdit::End ? kHead : kAccent, LV_OPA_COVER);
+    }
+
+    /* The ruler takes a finger: a tap puts the playhead on that bar -- where
+     * the next PLAY starts, or, playing, where the song goes on from. A drag
+     * still scrolls the lanes (no CLICKED after a scroll). Taller than the
+     * ruler's 10 px, over the top of the lanes, so a fingertip finds it. */
+    {
+        lv_obj_t* r = lv_obj_create(s_timeline);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_pos(r, 0, 0);
+        lv_obj_set_size(r, (int32_t)bars * s_pxPerBar, kRulerH + 4);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_group_remove_obj(r);
+        lv_obj_add_event_cb(r, ruler_cb, LV_EVENT_CLICKED, nullptr);
     }
 
     s_playhead = lv_obj_create(s_timeline);
