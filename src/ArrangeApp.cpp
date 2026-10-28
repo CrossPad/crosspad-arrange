@@ -535,9 +535,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_set_style_outline_color(h, kHead, LV_STATE_FOCUS_KEY);
         lv_obj_set_style_outline_width(h, 2, LV_STATE_FOCUS_KEY);
         lv_obj_add_event_cb(h, head_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
-        /* The tracks' levels, from the tracks. The export's tool row has five
-         * keys and MIX is not one of them, so it moved to the one gesture
-         * these buttons were not using -- and the association is exact. */
+        /* Held: the track's mute, at once (head_hold_cb()). */
         lv_obj_add_event_cb(h, head_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)t);
         /* One line over the name: "01" in the type's colour, S and M beside
          * it, then ARM on a seq track. They only show: a touch anywhere on the
@@ -730,7 +728,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     /* ── tools on the selected block ──────────────────────────────────────
      * The export's five keys at 58 px on a 62 px pitch, filling the width.
      * Z- and Z+ became ZOOM in the context row and MIX a key there beside the
-     * song (and a long press on a track button); everything else is where it
+     * song; everything else is where it
      * was. MOVE stays an editable
      * button -- the encoder nudges the block with it, which no plain key
      * could do. */

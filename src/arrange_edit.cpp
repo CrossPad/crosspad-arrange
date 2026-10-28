@@ -432,29 +432,30 @@ bool back_handler(lv_obj_t*)
     return elements_back();
 }
 
-/// A long press on a track's header: an audio track's input (with MIX beside
-/// it in the same sheet), MIX straight away on any other.
+/// A track header held: its mute, at once -- the one move a player makes
+/// mid-song with no time for a menu. Levels are MIX's (the key beside the
+/// song's name), an audio track's input its menu's.
 void head_hold_cb(lv_event_t* e)
 {
     auto* se = engine();
     if (!se) return;
     const int t = (int)(intptr_t)lv_event_get_user_data(e);
-    bool audio = false;
+    if (lv_indev_t* in = lv_indev_active()) lv_indev_wait_release(in);   // no CLICKED: no menu after it
+    toggle_mute(t);
+    bool muted = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& tr = se->song().tracks[t];
-        audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
+        muted = se->song().tracks[t].muted;
     }
-    if (audio) input_sheet(t);
-    else       mix_cb(e);
+    rebuild_timeline();
+    note_fmt("Track %d %s.", t + 1, muted ? "muted" : "on again");
 }
 
 /// A track header picks the track and opens its menu -- BOUNCE and DELETE,
 /// what acts on a track rather than on a block. EDIT acts on the one picked,
 /// and a seq track that loops over the whole song has no block to click, so
-/// this is the only way to reach it -- which is why the click does not mute.
-/// Mute is the M button in MIX (a long press on the same header), where the
-/// levels are.
+/// this is the only way to reach it -- which is why the click does not mute;
+/// holding it does (head_hold_cb()).
 void head_cb(lv_event_t* e)
 {
     auto* se = engine();

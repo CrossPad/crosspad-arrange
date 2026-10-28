@@ -186,7 +186,7 @@ static void choose_audio_cb(lv_event_t*)
     select(made, -1);
     rebuild_timeline();
     if (crosspad::getPlatformServices().sampleTools) {
-        note_fmt("Track %d armed: REC records the mics into it. Hold its header for another input.", made + 1);
+        note_fmt("Track %d armed: REC records the mics into it. Tap its header for another input.", made + 1);
     } else {
         note_fmt("Track %d added. No recorder in this firmware -- EDIT it to add a clip.", made + 1);
     }
