@@ -134,8 +134,16 @@ static void kit_slot(crosspad::ISongEngine* se, const crosspad::FreezeState* st,
             s_slotPrevWant = s_slotWant;
             s_slotWant = want;
         }
-        const int usable = crosspad::getPlatformServices().thirdKit ? crosspad::AudioSong::kKitSlots : 1;
-        if (!crosspad::kitSlotsNext(song, st, want, s_slotPrevWant, skip, se->playing(), slots, usable)) return;
+        const auto& ps = crosspad::getPlatformServices();
+        const int usable = ps.thirdKit ? crosspad::AudioSong::kKitSlots : 1;
+        /* A frozen kit stays cached in its slot while the song plays -- but
+         * not while the Pitch instrument could not be built beside the kits:
+         * the cached heads are the memory it is missing, and its keeper asks
+         * again later (zone_0: no memory, hil_torture_song, 2026-10-28). */
+        const bool starved = ps.instrumentHost && song_has_pitch_track() &&
+                             ps.instrumentHost->state() == crosspad::IInstrumentHost::State::Failed;
+        const bool cache = se->playing() && !starved;
+        if (!crosspad::kitSlotsNext(song, st, want, s_slotPrevWant, skip, cache, slots, usable)) return;
         for (int s = 0; s < crosspad::AudioSong::kKitSlots; ++s) {
             song.kitSlots[s] = slots[s];
             if (slots[s] >= 0) kits[s] = song.tracks[slots[s]].kit;
