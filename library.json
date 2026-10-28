@@ -1,6 +1,6 @@
 {
     "name": "crosspad-arrange",
-    "version": "0.32.0",
+    "version": "0.33.0",
     "license": "GPL-3.0-or-later",
     "description": "Eight tracks of clips and seq blocks on a timeline",
     "keywords": ["crosspad", "arrange", "lvgl", "pad"],

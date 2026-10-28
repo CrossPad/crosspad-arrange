@@ -693,6 +693,36 @@ static void region_dup_cb(lv_event_t*)
     });
 }
 
+/// The selected seq block taken again: the loop region round it, its track
+/// armed, REC from its first bar (counted in as the pattern's PRE says).
+static void rerecord_cb(lv_event_t*)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    const int t = s_selTrack;
+    uint32_t bar = 0, bars = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        const auto& cs = song.tracks[t].clips;
+        if (s_selIndex < 0 || s_selIndex >= (int)cs.size()) return;
+        bar = cs[(size_t)s_selIndex].bar;
+        bars = cs[(size_t)s_selIndex].bars;
+        song.loopStart = bar;
+        song.loopEnd = bar + bars;
+        song.loop = true;
+    }
+    se->commit();
+    if (se->playing()) crosspad::songTransport().stop();
+    arm_track(t);
+    crosspad::songTransport().setStartBar(bar);
+    crosspad::songTransport().record();
+    sync_transport();
+    note_fmt("Take again: bars %u - %u go round until STOP. Hold EDIT to undo a pass.",
+             (unsigned)bar + 1, (unsigned)(bar + bars));
+}
+
 /// Room the length of the region before it: everything from its start on
 /// moves later, the region with it.
 static void region_insert_cb(lv_event_t*)
@@ -920,7 +950,7 @@ void edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging) return;
-    bool region = false, block = false, tracked = false, stale = false;
+    bool region = false, block = false, tracked = false, stale = false, seqBlock = false;
     uint32_t a = 0, b = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -931,6 +961,7 @@ void edit_cb(lv_event_t*)
         b = song.loopEnd;
         const auto& cs = song.tracks[s_selTrack].clips;
         block = s_selIndex >= 0 && s_selIndex < (int)cs.size();
+        seqBlock = block && !cs[(size_t)s_selIndex].isElement() && song.seqRoute(s_selTrack) >= 0;
         stale = block && cs[(size_t)s_selIndex].isElement()
                 && se->elementClipState((uint8_t)s_selTrack, (size_t)s_selIndex) == crosspad::ElementClipState::Stale;
     }
@@ -953,6 +984,10 @@ void edit_cb(lv_event_t*)
      * it was the "+ ADD" key before the export's row gave that slot to EDIT
      * and BOUNCE. A track is normally filled by recording into it; this is
      * for a clip the project already has. */
+    /* Not a note editor -- the screen is too small for one -- but the take
+     * again, round the block until it is right: the first pass replaces it,
+     * the next ones are dubbed in, and EDIT held undoes a pass gone wrong. */
+    if (seqBlock) overlay_item(LV_SYMBOL_REFRESH " Record this block again", rerecord_cb, nullptr);
     overlay_item(LV_SYMBOL_PLUS " Add a clip from the library ...",
                  [](lv_event_t* e) { close_overlay(); add_cb(e); }, nullptr);
     overlay_item(LV_SYMBOL_PLUS " New element here", element_new_cb, nullptr);
