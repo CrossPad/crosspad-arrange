@@ -740,7 +740,6 @@ void rebuild_timeline()
         set_ink(s_headNum[t], track_color(tr));
         if (s_headName[t]) {
             const std::string title = track_title(song, t);
-            const char* name = title.c_str();
             /* Dim while it has only its kind for a name. */
             const bool named = !tr.name.empty() || !kit_name(track_kit(song, t)).empty();
             /* Frozen, it plays its file, not its engine (auto_freeze()). */
@@ -764,19 +763,22 @@ void rebuild_timeline()
             }
             lv_obj_set_x(s_headName[t], ice ? 21 : 5);
             lv_obj_set_width(s_headName[t], ice ? kHeadW - 26 : kHeadW - 10);
-            if (bouncing) set_text(s_headName[t], "BOUNCING...");
-            else if (parked) set_text_fmt(s_headName[t], "PARKED %s", name);
-            else set_text(s_headName[t], name);
+            const std::string shownText = bouncing ? std::string("BOUNCING...")
+                                        : parked   ? "PARKED " + title
+                                                   : title;
+            set_text(s_headName[t], shownText.c_str());
             /* A name that does not fit is set smaller, not cut: "VINTAG" and
              * "sub_bas" were two kits nobody could tell apart. */
             {
-                const char* shown = lv_label_get_text(s_headName[t]);
                 lv_point_t sz;
-                lv_text_get_size(&sz, shown, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                lv_text_get_size(&sz, shownText.c_str(), &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
                 const lv_font_t* f = sz.x > lv_obj_get_width(s_headName[t]) ? &lv_font_montserrat_10 : &lv_font_montserrat_14;
                 if (lv_obj_get_style_text_font(s_headName[t], 0) != f) {
                     lv_obj_set_style_text_font(s_headName[t], f, 0);
                     lv_obj_set_y(s_headName[t], f == &lv_font_montserrat_14 ? 11 : 14);
+                    /* Too long even small: it ends in dots, so it reads as cut, not as a name. */
+                    lv_label_set_long_mode(s_headName[t], f == &lv_font_montserrat_14 ? LV_LABEL_LONG_CLIP : LV_LABEL_LONG_DOT);
+                    lv_obj_set_height(s_headName[t], lv_font_get_line_height(f));   // one line, or DOT wraps it
                 }
             }
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce

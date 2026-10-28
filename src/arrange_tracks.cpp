@@ -809,6 +809,63 @@ void input_sheet(int track)
 
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
+/// The picked track again, on the lowest free track: an audio track's
+/// blocks, or a kit track's own-note blocks on a kit of its own -- the same
+/// kit, in a kit slot -- with its levels; ARM stays where it was. A song has
+/// one Pitch track, so that one is not doubled.
+static void duplicate_track()
+{
+    auto* se = engine();
+    if (!se) return;
+    const int from = s_selTrack;
+    crosspad::SongTrack src;
+    std::string kit, title;
+    int8_t armed = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        src = song.tracks[from];
+        kit = track_kit(song, from);
+        title = track_title(song, from);
+        armed = song.armed;
+    }
+    const bool audio = src.kind == crosspad::TrackKind::Audio;
+    if (!audio && src.source == crosspad::SeqSource::Pitch) {
+        note("A song has one Pitch track: bounce this one to audio to have it twice.");
+        return;
+    }
+    if (!audio && kit.empty()) { note("This track has no kit to play a copy with."); return; }
+    int made = -1;
+    if (audio) {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        made = se->song().freeTrack();
+        if (made >= 0 && !se->song().addAudioTrack(made)) made = -1;
+    } else {
+        made = make_seq_track(crosspad::SeqSource::Kit, kit);
+    }
+    if (made < 0) { note("No room: all tracks are in use, or both kit slots are."); return; }
+    int left = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        auto& dst = song.tracks[made];
+        for (const auto& c : src.clips) {
+            if (!audio && !c.notes && !c.isElement()) { ++left; continue; }   // the scene's: no notes of its own
+            dst.clips.push_back(c);
+        }
+        dst.volume = src.volume;
+        dst.pan = src.pan;
+        if (audio) { dst.input = src.input; dst.stretch = src.stretch; }
+        dst.name = (title + " 2").substr(0, 16);
+        song.armed = armed;
+    }
+    se->commit();
+    select(made, -1);
+    rebuild_timeline();
+    if (left) note_fmt("Track %d is a copy; %d block%s playing the scene stayed behind.", made + 1, left, left == 1 ? "" : "s");
+    else      note_fmt("Track %d is a copy of track %d.", made + 1, from + 1);
+}
+
 /// The picked track one place up (-1) or down (+1) the list, its blocks,
 /// sound and levels with it (AudioSong::swapTracks()).
 static void move_track_order(int dir)
@@ -889,6 +946,7 @@ void track_menu()
     overlay_key(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); });
     overlay_key(LV_SYMBOL_EDIT " Rename ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); });
+    overlay_key(LV_SYMBOL_COPY " Duplicate", [](lv_event_t*) { close_overlay(); duplicate_track(); });
     if (s_selTrack > 0) overlay_key(LV_SYMBOL_UP " Move up", [](lv_event_t*) { close_overlay(); move_track_order(-1); });
     if (canDown) overlay_key(LV_SYMBOL_DOWN " Move down", [](lv_event_t*) { close_overlay(); move_track_order(+1); });
     overlay_key(LV_SYMBOL_TRASH " Delete ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); });
