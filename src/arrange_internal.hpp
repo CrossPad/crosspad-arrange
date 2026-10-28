@@ -275,6 +275,7 @@ extern int      s_zoom;
 extern int32_t  s_pxPerBar;
 extern int      s_selTrack;
 extern int      s_selIndex;
+extern bool     s_selQuiet;   ///< the next selection does not locate the song (a header picked)
 extern uint32_t s_shape;
 extern uint32_t s_framesPerBar;
 extern uint32_t s_peakHop;
@@ -311,6 +312,7 @@ extern lv_obj_t*  s_regionHandle;
 extern bool       s_regionArmed;
 extern std::vector<crosspad::RangeClip> s_clipboard;
 extern uint32_t  s_clipboardBars;
+extern std::string s_clipboardDir;   ///< the song the bars were copied in
 extern bool      s_merging;
 extern uint32_t  s_mergeMask;
 extern lv_obj_t* s_mergeToggles[kTracks];
@@ -393,6 +395,8 @@ void size_lanes(int rows);
 void toggle_mute(int t);
 void toggle_solo(int t);
 void arm_track(int t);
+/// A REC or DUB runs (a seq take or an audio take).
+bool take_running(crosspad::ISongEngine* se);
 void mix_forget();
 void mix_meters(crosspad::ISongEngine* se);
 void style_toggle(lv_obj_t* b, bool on, lv_color_t col);

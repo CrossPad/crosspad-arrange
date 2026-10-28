@@ -493,6 +493,9 @@ void head_cb(lv_event_t* e)
         if (!tr.inUse) return;
         index = s_selTrack == t ? s_selIndex : (tr.clips.empty() ? -1 : 0);
     }
+    /* A header picks its track, for ARM, mute or its menu: PLAY and REC
+     * still start where the player put the song, not at its first block. */
+    s_selQuiet = true;
     select(t, index);
     /* The release of a hold that opened MIX is a click too; MIX is up then. */
     track_menu();
@@ -688,6 +691,7 @@ static void region_copy_cb(lv_event_t*)
         const uint32_t spb = prepare_bar_edit(song);
         s_clipboard = song.copyRange(song.loopStart, song.loopEnd, spb);
         s_clipboardBars = song.loopEnd - song.loopStart;
+        s_clipboardDir = song.dir;
     });
 }
 
@@ -696,7 +700,7 @@ static void region_copy_cb(lv_event_t*)
 static void region_paste_cb(lv_event_t*)
 {
     region_edit([](crosspad::AudioSong& song) {
-        if (s_clipboard.empty() || !s_clipboardBars) return;
+        if (s_clipboard.empty() || !s_clipboardBars || s_clipboardDir != song.dir) return;
         const uint32_t spb = prepare_bar_edit(song);
         song.insertBars(song.loopStart, s_clipboardBars, spb);
         song.pasteRange(s_clipboard, song.loopStart);
@@ -726,6 +730,7 @@ static void rerecord_cb(lv_event_t*)
     auto* se = engine();
     close_overlay();
     if (!se) return;
+    if (take_running(se)) { note("STOP the take first, then take this block again."); return; }
     const int t = s_selTrack;
     uint32_t bar = 0, bars = 0;
     {
@@ -745,7 +750,7 @@ static void rerecord_cb(lv_event_t*)
     crosspad::songTransport().setStartBar(bar);
     crosspad::songTransport().record();
     sync_transport();
-    note_fmt("Take again: bars %u - %u go round until STOP. Hold EDIT to undo a pass.",
+    note_fmt("Take again: bars %u - %u go round until STOP; then hold EDIT to undo a pass.",
              (unsigned)bar + 1, (unsigned)(bar + bars));
 }
 
@@ -957,6 +962,8 @@ static void undo_redo(bool back)
     if (back ? se->undo() : se->redo()) {
         select(s_selTrack, -1);
         note(back ? "Undone." : "Redone.");
+    } else if (take_running(se)) {
+        note("STOP the take first: then hold EDIT to undo a pass.");
     } else {
         note("Not now: a merge, a bounce or a new tempo is still being written.");
     }
@@ -976,11 +983,14 @@ void edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging) return;
-    bool region = false, block = false, tracked = false, stale = false, seqBlock = false;
+    bool region = false, block = false, tracked = false, stale = false, seqBlock = false, paste = false;
     uint32_t a = 0, b = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
+        /* Copied bars name their files in clips/ of the song they came from:
+         * pasted in another (or an element) they would be missing. */
+        paste = !s_clipboard.empty() && s_clipboardDir == song.dir;
         tracked = song.tracks[s_selTrack].inUse;
         region = song.hasRegion();
         a = song.loopStart;
@@ -1031,7 +1041,7 @@ void edit_cb(lv_event_t*)
         overlay_item(LV_SYMBOL_COPY " Copy the region", region_copy_cb, nullptr);
         overlay_item(LV_SYMBOL_LIST " Make element from region", element_region_cb, nullptr);
         char buf[64];
-        if (!s_clipboard.empty()) {
+        if (paste) {
             std::snprintf(buf, sizeof(buf), LV_SYMBOL_PASTE " Paste %u bars at the region", (unsigned)s_clipboardBars);
             overlay_item(buf, region_paste_cb, nullptr);
         }

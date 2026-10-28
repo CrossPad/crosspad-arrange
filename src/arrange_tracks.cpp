@@ -148,6 +148,7 @@ static void sheet_keys(const char* const* labels, const lv_event_cb_t* cbs, int 
 static void new_track_sheet();
 static void seq_source_sheet();
 static void open_seq_track(int track);
+static bool tracks_held(crosspad::ISongEngine* se);
 static void pick_kit_for(int track, crosspad::KitList list = crosspad::KitList::Any);
 
 /// Is the selected track one that holds a seq? What a bounce needs.
@@ -580,7 +581,7 @@ static void delete_track_go_cb(lv_event_t*)
     auto* se = engine();
     const int track = s_selTrack;
     close_overlay();
-    if (!se) return;
+    if (!se || tracks_held(se)) return;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         if (!se->song().tracks[track].inUse) return;
@@ -878,16 +879,25 @@ static void duplicate_track()
 
 /// The picked track one place up (-1) or down (+1) the list, its blocks,
 /// sound and levels with it (AudioSong::swapTracks()).
+bool take_running(crosspad::ISongEngine* se)
+{
+    return se->seqTake() != crosspad::SyncTake::None || crosspad::arrangeAudioTake().recording();
+}
+
+/// A freeze, a harvest or a take names its track by number: the tracks
+/// keep their places while one runs. Says so when they must.
+static bool tracks_held(crosspad::ISongEngine* se)
+{
+    if (se->bounceStatus().state != crosspad::BounceState::Running && se->harvestingTrack() < 0 && !take_running(se))
+        return false;
+    note("Not now: a track is being frozen or recorded -- in a moment.");
+    return true;
+}
+
 static void move_track_order(int dir)
 {
     auto* se = engine();
-    if (!se) return;
-    /* A freeze, a harvest or a take names its track by number. */
-    if (se->bounceStatus().state == crosspad::BounceState::Running || se->harvestingTrack() >= 0 ||
-        se->seqTake() != crosspad::SyncTake::None || crosspad::arrangeAudioTake().recording()) {
-        note("Not now: a track is being frozen or recorded -- in a moment.");
-        return;
-    }
+    if (!se || tracks_held(se)) return;
     bool moved = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());

@@ -196,6 +196,17 @@ void arm_track(int t)
 {
     auto* se = engine();
     if (!se || t < 0 || t >= kTracks) return;
+    /* The take records onto the track it started on, with its kit under the
+     * fingers: ARM moves once it has ended. */
+    if (take_running(se)) {
+        bool same = false;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            same = se->song().armed == t;
+        }
+        if (!same) note("STOP the take first: it records onto the armed track.");
+        return;
+    }
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();

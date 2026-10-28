@@ -184,6 +184,12 @@ void tick_cb(lv_timer_t*)
             note_fmt("No take: %s.", landed.error.c_str());
         }
     }
+    /* A REC that could not start, wherever it was pressed. */
+    static uint32_t refused = crosspad::arrangeAudioTake().refusals();
+    if (crosspad::arrangeAudioTake().refusals() != refused) {
+        refused = crosspad::arrangeAudioTake().refusals();
+        note_fmt("No REC: %s.", crosspad::arrangeAudioTake().lastError().c_str());
+    }
     if (s_merging) {
         char buf[48];
         if (se->editState() == crosspad::SongOpState::Busy) {

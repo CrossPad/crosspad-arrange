@@ -291,6 +291,7 @@ int      s_zoom = 2;                // index into kZoomPx (s_pxPerBar's); kept a
 int32_t  s_pxPerBar = kZoomPx[2];
 int      s_selTrack = 0;
 int      s_selIndex = -1;
+bool     s_selQuiet = false;
 uint32_t s_shape = 0;
 /* Where a waveform's values fall: frames per bar at the song's tempo, frames
  * per value, and the engine's count of waveforms that have come in. */
@@ -340,6 +341,7 @@ bool       s_regionArmed = false;
  * as much as the audio (AudioSong::copyRange()). */
 std::vector<crosspad::RangeClip> s_clipboard;
 uint32_t  s_clipboardBars = 0;
+std::string s_clipboardDir;
 
 /* A merge the platform is doing on the card, and the tracks picked for one. */
 bool      s_merging = false;
@@ -365,6 +367,10 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     mix((uint32_t)lroundf(s.bpm * 100.0f));     // where each clip's waveform falls on the bars
     /* The kit badges: a kit loaded in the kit browser is the song's too. */
     for (char c : s.kit) mix((uint8_t)c);
+    /* ARM and the kit slots: which track plays live, which is parked or on
+     * its freeze (the headers' marks); the slots move after an ARM. */
+    mix((uint32_t)(int32_t)s.armed);
+    for (int8_t k : s.kitSlots) mix((uint32_t)(int32_t)k);
     for (int t = 0; t < kTracks; ++t) {
         for (char c : s.tracks[t].kit) mix((uint8_t)c);
         mix(0xABCDu + t);

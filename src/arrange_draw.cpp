@@ -221,9 +221,10 @@ void update_info()
         static int locTrack = -1, locIndex = -1;
         const auto& sel = song.tracks[s_selTrack].clips;
         const bool valid = s_selIndex >= 0 && s_selIndex < (int)sel.size();
-        if (valid && (s_selTrack != locTrack || s_selIndex != locIndex)) {
+        if (valid && !s_selQuiet && (s_selTrack != locTrack || s_selIndex != locIndex)) {
             crosspad::songTransport().setStartBar(sel[s_selIndex].bar);
         }
+        s_selQuiet = false;
         locTrack = s_selTrack;
         locIndex = valid ? s_selIndex : -1;
     }
