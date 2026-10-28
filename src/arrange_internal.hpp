@@ -147,7 +147,16 @@ inline const lv_color_t kAudioT = lv_color_hex(0x4EA6D3);    // AUD   -- the Rec
 
 inline const lv_color_t kKitT   = lv_color_hex(0xFFC857);    // KIT   -- the Sampler's amber
 
-inline const lv_color_t kPitchT = lv_color_hex(0xA77BF0);    // PITCH -- Pitch Play's purple
+inline const lv_color_t kPitchT = lv_color_hex(0xA77BF0);
+/// The colours a player can give a track (SongTrack::colour 1..8): bright
+/// enough for ink on them, apart from each other and from REC's red.
+struct TrackSwatch { const char* name; lv_color_t color; };
+inline const TrackSwatch kTrackPalette[crosspad::SongTrack::kTrackColours] = {
+    {"Coral",  lv_color_hex(0xFF8A65)}, {"Orange", lv_color_hex(0xFFA726)},
+    {"Lime",   lv_color_hex(0xC0E05A)}, {"Green",  lv_color_hex(0x5CCB82)},
+    {"Teal",   lv_color_hex(0x40C4B8)}, {"Sky",    lv_color_hex(0x6FB8FF)},
+    {"Violet", lv_color_hex(0xB08CFF)}, {"Pink",   lv_color_hex(0xF48FC8)},
+};    // PITCH -- Pitch Play's purple
 
 /// The inputs an audio track can record, in the order its input sheet lists
 /// them, and what the header and the sheet call each.
@@ -233,6 +242,7 @@ extern bool      s_follow;
 extern lv_obj_t* s_heads[kTracks];
 extern lv_obj_t* s_headNum[kTracks];
 extern lv_obj_t* s_headName[kTracks];
+extern lv_obj_t* s_headMon[kTracks];   ///< an audio track's input monitored: a speaker before its name
 extern lv_obj_t* s_headIce[kTracks];   ///< a frozen track's snowflake, before its name
 extern lv_obj_t* s_headProg[kTracks];  ///< a freeze or bounce running: how far, along the header's foot
 extern lv_obj_t* s_headMute[kTracks];
@@ -331,6 +341,8 @@ std::string track_kit(const crosspad::AudioSong& song, int t);
 /// instrument still loading, or one that would not load.
 enum class TrackSound : uint8_t { Ok, Loading, Failed };
 TrackSound track_sound(const crosspad::AudioSong& song, int t);
+/// An audio track whose input MONITOR has on the speakers and jacks.
+bool track_monitored(const crosspad::AudioSong& song, int t);
 /// What a track is called on its header and its MIX strip: its name, else its
 /// kit's, else "AUD <input>" or its kind.
 std::string track_title(const crosspad::AudioSong& song, int t);

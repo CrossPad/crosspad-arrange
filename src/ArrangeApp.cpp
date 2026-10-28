@@ -104,6 +104,7 @@ void set_text_fmt(lv_obj_t* label, const char* fmt, ...)
 
 lv_color_t track_color(const crosspad::SongTrack& t)
 {
+    if (t.colour >= 1 && t.colour <= crosspad::SongTrack::kTrackColours) return kTrackPalette[t.colour - 1].color;
     if (t.kind != crosspad::TrackKind::Seq) return kAudioT;
     return t.source == crosspad::SeqSource::Pitch ? kPitchT : kKitT;
 }
@@ -202,6 +203,7 @@ lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headIce[kTracks] = {};
+lv_obj_t* s_headMon[kTracks] = {};
 lv_obj_t* s_headProg[kTracks] = {};
 
 /* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
@@ -376,6 +378,13 @@ TrackSound track_sound(const crosspad::AudioSong& song, int t)
     return TrackSound::Ok;
 }
 
+bool track_monitored(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    const crosspad::IInputMonitor* mon = crosspad::getPlatformServices().inputMonitor;
+    return mon && tr.inUse && tr.kind == crosspad::TrackKind::Audio && mon->monitoring(tr.input);
+}
+
 /// Everything the timeline draws, folded into one word; when it changes (an
 /// edit, a bounce landing, another project) the timeline is rebuilt.
 uint32_t song_shape(const crosspad::AudioSong& s)
@@ -406,6 +415,8 @@ uint32_t song_shape(const crosspad::AudioSong& s)
         mix((uint32_t)s.tracks[t].source);
         mix(s.tracks[t].scene);
         mix(s.tracks[t].seqBlocks);
+        mix(s.tracks[t].colour);
+        mix(track_monitored(s, t));
         mix((uint32_t)track_sound(s, t));          // LOADING / ! on its header
         for (const auto& c : s.tracks[t].clips) {
             mix(c.bar); mix(c.bars); mix(c.offset); mix(c.frames); mix(c.from);
@@ -658,6 +669,16 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(arm, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(arm, LV_OBJ_FLAG_CLICKABLE);
         s_headArm[t] = arm;
+        /* An audio track whose input is heard live (MONITOR): a speaker
+         * where a seq track's snowflake would be, the name after it. */
+        lv_obj_t* mon = lv_label_create(h);
+        lv_obj_set_style_text_font(mon, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(mon, kAccent, 0);
+        lv_label_set_text(mon, LV_SYMBOL_VOLUME_MAX);
+        lv_obj_set_pos(mon, 5, 15);
+        lv_obj_remove_flag(mon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(mon, LV_OBJ_FLAG_HIDDEN);
+        s_headMon[t] = mon;
         s_heads[t] = h;
         s_headNum[t] = l;
         s_headName[t] = name;
@@ -948,6 +969,7 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headNum) l = nullptr;
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
+    for (auto& m : s_headMon) m = nullptr;
     for (auto& p : s_headProg) p = nullptr;
     drag_forget();
     for (auto& b : s_headMute) b = nullptr;

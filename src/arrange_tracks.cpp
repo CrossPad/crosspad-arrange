@@ -811,6 +811,48 @@ void input_sheet(int track)
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
 }
 
+/// The track's colour: its kind's, or one of the palette's -- the header's
+/// number, its blocks and its MIX strip take it.
+static void colour_sheet()
+{
+    auto* se = engine();
+    if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
+    uint8_t cur = 0;
+    crosspad::SongTrack kind;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse) return;
+        cur = t.colour;
+        kind.kind = t.kind;
+        kind.source = t.source;
+    }
+    char title[32];
+    std::snprintf(title, sizeof(title), "Track %d  -  colour", s_selTrack + 1);
+    overlay_keys(title);
+    auto pick = [](lv_event_t* e) {
+        const uint8_t c = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+        close_overlay();
+        auto* se = engine();
+        if (!se) return;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            se->song().tracks[s_selTrack].colour = c;
+        }
+        se->commit();
+        rebuild_timeline();
+    };
+    for (uint8_t c = 0; c <= crosspad::SongTrack::kTrackColours; ++c) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%s %s", c == cur ? LV_SYMBOL_OK : "", c ? kTrackPalette[c - 1].name : "As its kind");
+        kind.colour = c;
+        lv_obj_t* b = overlay_key(text, pick, (void*)(intptr_t)c);
+        lv_obj_set_style_bg_color(b, track_color(kind), 0);
+        lv_obj_set_style_text_color(b, kInk, 0);
+    }
+    overlay_key(LV_SYMBOL_CLOSE " Cancel", cancel_cb);
+}
+
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
 /// The picked track again, on the lowest free track: an audio track's
@@ -859,6 +901,7 @@ static void duplicate_track()
         }
         dst.volume = src.volume;
         dst.pan = src.pan;
+        dst.colour = src.colour;
         if (audio) { dst.input = src.input; dst.stretch = src.stretch; }
         /* Cut on a letter, not a byte (a Polish kit name), and " 2" kept. */
         std::string base = title;
@@ -966,6 +1009,7 @@ void track_menu()
     overlay_key(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); });
     overlay_key(LV_SYMBOL_EDIT " Rename ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); });
+    overlay_key(LV_SYMBOL_IMAGE " Colour ...", [](lv_event_t*) { close_overlay(); colour_sheet(); });
     overlay_key(LV_SYMBOL_COPY " Duplicate", [](lv_event_t*) { close_overlay(); duplicate_track(); });
     if (s_selTrack > 0) overlay_key(LV_SYMBOL_UP " Move up", [](lv_event_t*) { close_overlay(); move_track_order(-1); });
     if (canDown) overlay_key(LV_SYMBOL_DOWN " Move down", [](lv_event_t*) { close_overlay(); move_track_order(+1); });

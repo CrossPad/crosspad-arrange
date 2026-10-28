@@ -597,8 +597,8 @@ void rebuild_timeline()
             lv_obj_set_pos(o, (int32_t)c.bar * s_pxPerBar, y);
             lv_obj_set_size(o, std::max<int32_t>(2, (int32_t)c.bars * s_pxPerBar - 1), kLaneH);
             lv_obj_set_style_radius(o, 3, 0);
-            /* Coloured by type, like the track's badge (UX 2000 section 7). */
-            lv_obj_set_style_bg_color(o, seq ? track_color(song.tracks[tr]) : kAudioT, 0);
+            /* Coloured as its track: its type's, like the badge (UX 2000 section 7), or the player's. */
+            lv_obj_set_style_bg_color(o, track_color(song.tracks[tr]), 0);
             lv_obj_set_style_bg_opa(o, song.silenced(tr) ? LV_OPA_30 : LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(o, 2, 0);
             lv_obj_set_style_pad_top(o, 1, 0);
@@ -768,8 +768,13 @@ void rebuild_timeline()
                 else     lv_obj_add_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
                 lv_obj_set_style_image_opa(s_headIce[t], frozen ? LV_OPA_COVER : LV_OPA_50, 0);
             }
-            lv_obj_set_x(s_headName[t], ice ? 21 : 5);
-            lv_obj_set_width(s_headName[t], ice ? kHeadW - 26 : kHeadW - 10);
+            const bool mon = track_monitored(song, t);
+            if (s_headMon[t]) {
+                if (mon) lv_obj_remove_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
+                else     lv_obj_add_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
+            }
+            lv_obj_set_x(s_headName[t], ice || mon ? 21 : 5);
+            lv_obj_set_width(s_headName[t], ice || mon ? kHeadW - 26 : kHeadW - 10);
             const std::string shownText = bouncing ? std::string("BOUNCING...")
                                         : parked   ? "PARKED " + title
                                         : sound == TrackSound::Loading ? "LOADING " + title
