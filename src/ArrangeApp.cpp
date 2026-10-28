@@ -134,11 +134,25 @@ std::string kit_name(const std::string& kitPath)
 {
     crosspad::IKitManager* km = crosspad::getKitManager();
     if (!km || kitPath.empty()) return {};
+    const crosspad::KitInfo* found = nullptr;
+    for (int i = 0; i < km->getKitCount() && !found; ++i) {
+        const crosspad::KitInfo* k = km->getKit(i);
+        if (k && k->path == kitPath) found = k;
+    }
+    if (!found) return {};
+    /* Two kits by one name ("BASIC" in two packs) say their folders, which
+     * the card keeps apart: two tracks both called BASIC were no help. */
     for (int i = 0; i < km->getKitCount(); ++i) {
         const crosspad::KitInfo* k = km->getKit(i);
-        if (k && k->path == kitPath) return k->name;
+        if (!k || k == found || k->name != found->name) continue;
+        std::string folder = kitPath;
+        const size_t file = folder.find_last_of('/');
+        if (file != std::string::npos) folder.erase(file);
+        const size_t slash = folder.find_last_of('/');
+        if (slash != std::string::npos) folder.erase(0, slash + 1);
+        return folder.empty() ? found->name : folder;
     }
-    return {};
+    return found->name;
 }
 
 /// The kit seq track @p t plays: its own on the second kit's route, else the
