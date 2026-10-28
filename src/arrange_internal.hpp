@@ -327,6 +327,10 @@ const char* input_name(crosspad::RecInput in);
 bool track_armed(const crosspad::AudioSong& song, int t);
 std::string kit_name(const std::string& kitPath);
 std::string track_kit(const crosspad::AudioSong& song, int t);
+/// A seq track's sound in its engine: what its header says of a kit or an
+/// instrument still loading, or one that would not load.
+enum class TrackSound : uint8_t { Ok, Loading, Failed };
+TrackSound track_sound(const crosspad::AudioSong& song, int t);
 /// What a track is called on its header and its MIX strip: its name, else its
 /// kit's, else "AUD <input>" or its kind.
 std::string track_title(const crosspad::AudioSong& song, int t);

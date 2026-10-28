@@ -353,6 +353,29 @@ crosspad::ISongEngine* engine()
     return crosspad::getPlatformServices().songEngine;
 }
 
+TrackSound track_sound(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq) return TrackSound::Ok;
+    const auto& ps = crosspad::getPlatformServices();
+    const int route = song.liveRoute(t);
+    if (route == 1 || route == 3) {
+        const crosspad::ISecondKit* k = route == 3 ? ps.thirdKit : ps.secondKit;
+        if (!k) return TrackSound::Ok;
+        const auto st = k->state();
+        return st == crosspad::ISecondKit::State::Loading ? TrackSound::Loading
+             : st == crosspad::ISecondKit::State::Failed  ? TrackSound::Failed
+                                                          : TrackSound::Ok;
+    }
+    if (route == 2 && ps.instrumentHost) {
+        const auto st = ps.instrumentHost->state();
+        return st == crosspad::IInstrumentHost::State::Busy   ? TrackSound::Loading
+             : st == crosspad::IInstrumentHost::State::Failed ? TrackSound::Failed
+                                                              : TrackSound::Ok;
+    }
+    return TrackSound::Ok;
+}
+
 /// Everything the timeline draws, folded into one word; when it changes (an
 /// edit, a bounce landing, another project) the timeline is rebuilt.
 uint32_t song_shape(const crosspad::AudioSong& s)
@@ -383,6 +406,7 @@ uint32_t song_shape(const crosspad::AudioSong& s)
         mix((uint32_t)s.tracks[t].source);
         mix(s.tracks[t].scene);
         mix(s.tracks[t].seqBlocks);
+        mix((uint32_t)track_sound(s, t));          // LOADING / ! on its header
         for (const auto& c : s.tracks[t].clips) {
             mix(c.bar); mix(c.bars); mix(c.offset); mix(c.frames); mix(c.from);
             mix((uint32_t)(uintptr_t)c.notes.get());   // a dub, the seq view: new notes, same bars
@@ -833,6 +857,8 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
             {
                 auto* se = engine();
                 crosspad::transportClaim(&crosspad::songTransport(), !(se && se->playing()));
+                /* The pads sound as MIX shows the armed track, stopped too. */
+                if (se) se->setSongScreen(true);
             }
             s_visible = true;
             sound_keeper_cb(nullptr);   // the instrument starts loading now, not in 100 ms
@@ -878,6 +904,7 @@ void Arrange_destroy(lv_obj_t* root)
     /* The pads go back before the next screen takes them; the instrument stays
      * while the song plays it (sound_keeper_cb). */
     s_visible = false;
+    if (auto* se = engine()) se->setSongScreen(false);
     if (s_soundPads && crosspad::getPadManager().getActivePadLogic() == kSoundLogic) {
         crosspad::getPadManager().popPadLogic();
     }

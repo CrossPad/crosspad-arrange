@@ -757,6 +757,8 @@ void rebuild_timeline()
             const bool noEngine = song.seqRoute(t) == 1 && song.liveRoute(t) < 0 && song.armed != t;
             const bool standIn = noEngine && fz == crosspad::FreezeState::Stale;
             const bool parked = noEngine && fz == crosspad::FreezeState::None;
+            /* Played by its engine (not its freeze): whether that has its sound. */
+            const TrackSound sound = frozen || noEngine ? TrackSound::Ok : track_sound(song, t);
             /* A snowflake says frozen, and a faint one freezing: the name
              * stays readable beside it instead of losing its start to "FRZ". */
             const bool bouncing = fz == crosspad::FreezeState::Freezing && s_bouncing == t;
@@ -770,6 +772,8 @@ void rebuild_timeline()
             lv_obj_set_width(s_headName[t], ice ? kHeadW - 26 : kHeadW - 10);
             const std::string shownText = bouncing ? std::string("BOUNCING...")
                                         : parked   ? "PARKED " + title
+                                        : sound == TrackSound::Loading ? "LOADING " + title
+                                        : sound == TrackSound::Failed  ? "! " + title
                                                    : title;
             set_text(s_headName[t], shownText.c_str());
             /* A name that does not fit is set smaller, not cut: "VINTAG" and
@@ -787,7 +791,8 @@ void rebuild_timeline()
                 }
             }
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
-                                   : parked || s_trackQuiet[t] || !named ? kDim : kText);
+                                   : sound == TrackSound::Failed ? kRec
+                                   : parked || sound == TrackSound::Loading || s_trackQuiet[t] || !named ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);
