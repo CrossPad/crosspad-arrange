@@ -2,6 +2,7 @@
 // auto-freeze of the seq tracks ARM is not on, and which kit tracks the two kit engines play.
 
 #include "arrange_internal.hpp"
+#include "crosspad/song/SongSounds.hpp"
 
 #include "crosspad/song/AutoFreeze.hpp"
 
@@ -262,7 +263,10 @@ void sound_keeper_cb(lv_timer_t*)
     auto_freeze(se);
     const bool playing = se && se->playing();
     const std::string path = crosspad::instrumentPlayState().instrumentPath;
-    const bool want = host && !path.empty() && song_has_pitch_track() &&
+    /* Not while a song's sounds are still coming: the path is then the last
+     * song's, and SongSounds is loading this one's. */
+    const crosspad::SongSounds* sounds = crosspad::getPlatformServices().songSounds;
+    const bool want = host && !path.empty() && song_has_pitch_track() && !(sounds && sounds->pending()) &&
                       (s_visible || playing || s_soundBounce);
 
     if (want) {

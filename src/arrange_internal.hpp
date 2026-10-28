@@ -322,6 +322,9 @@ const char* input_name(crosspad::RecInput in);
 bool track_armed(const crosspad::AudioSong& song, int t);
 std::string kit_name(const std::string& kitPath);
 std::string track_kit(const crosspad::AudioSong& song, int t);
+/// What a track is called on its header and its MIX strip: its name, else its
+/// kit's, else "AUD <input>" or its kind.
+std::string track_title(const crosspad::AudioSong& song, int t);
 crosspad::ISongEngine* engine();
 uint32_t song_shape(const crosspad::AudioSong& s);
 std::string short_name(const std::string& file);
@@ -341,6 +344,8 @@ void paint_tools();
 void enter_tools();
 int move_target(const crosspad::AudioSong& song, int from, int dir);
 void move_cb(lv_event_t* e);
+/// A block held and dragged to another bar or lane (registered on every block).
+void block_drag_cb(lv_event_t* e);
 void dup_cb(lv_event_t*);
 void del_cb(lv_event_t*);
 bool back_handler(lv_obj_t*);
@@ -368,6 +373,7 @@ void length_cb(lv_event_t*);
 void region_cb(lv_event_t* e);
 uint32_t playhead_bar();
 void edit_cb(lv_event_t*);
+void edit_hold_cb(lv_event_t*);
 void seq_track_made(int made);
 void bounce_sheet();
 void delete_track_sheet();

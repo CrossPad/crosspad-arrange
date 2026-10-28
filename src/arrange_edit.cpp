@@ -288,6 +288,85 @@ static void move_arrow_cb(lv_event_t* e)
     }, (void*)(intptr_t)d);
 }
 
+/* A block held, then dragged: it follows the finger, snapped to bars and to
+ * lanes, and lands where it is let go -- the move a finger expects, where
+ * MOVE's arrows took a tap a bar. */
+static struct {
+    lv_obj_t*  obj = nullptr;
+    lv_point_t start{};
+    int32_t    x0 = 0, y0 = 0;
+    int        bar0 = 0, track0 = 0, used = 1;
+    int        dBars = 0, dLanes = 0;
+} s_drag;
+
+void block_drag_cb(lv_event_t* e)
+{
+    lv_obj_t* o = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t* in = lv_indev_active();
+    if (code == LV_EVENT_LONG_PRESSED) {
+        const int k = (int)(intptr_t)lv_event_get_user_data(e);
+        auto* se = engine();
+        if (!se || !in || k < 0 || k >= s_blockCount || se->seqTake() != crosspad::SyncTake::None) return;
+        select(s_blocks[k].track, s_blocks[k].index);
+        s_drag = {};
+        s_drag.obj = o;
+        lv_indev_get_point(in, &s_drag.start);
+        s_drag.x0 = lv_obj_get_x(o);
+        s_drag.y0 = lv_obj_get_y(o);
+        s_drag.track0 = s_blocks[k].track;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            const auto& cs = se->song().tracks[s_selTrack].clips;
+            s_drag.bar0 = s_selIndex >= 0 && s_selIndex < (int)cs.size() ? (int)cs[(size_t)s_selIndex].bar : 0;
+            s_drag.used = std::max(1, se->song().usedTracks());
+        }
+        /* The lanes must not scroll under the finger that carries the block. */
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_obj_add_flag(o, LV_OBJ_FLAG_PRESS_LOCK);    // still its press when the finger runs ahead of it
+        lv_obj_set_style_outline_color(o, kHead, 0);
+        lv_obj_set_style_outline_width(o, 2, 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_70, 0);
+        lv_obj_move_foreground(o);
+        return;
+    }
+    if (o != s_drag.obj || !in) return;
+    if (code == LV_EVENT_PRESSING) {
+        lv_point_t p;
+        lv_indev_get_point(in, &p);
+        const int32_t pitch = kLaneH + kLaneGap;
+        const int32_t dx = p.x - s_drag.start.x, dy = p.y - s_drag.start.y;
+        int db = (int)((dx + (dx >= 0 ? s_pxPerBar / 2 : -s_pxPerBar / 2)) / std::max<int32_t>(1, s_pxPerBar));
+        int dl = (int)((dy + (dy >= 0 ? pitch / 2 : -pitch / 2)) / pitch);
+        db = std::max(db, -s_drag.bar0);
+        dl = std::clamp(dl, -s_drag.track0, s_drag.used - 1 - s_drag.track0);
+        if (db == s_drag.dBars && dl == s_drag.dLanes) return;
+        s_drag.dBars = db;
+        s_drag.dLanes = dl;
+        lv_obj_set_pos(o, s_drag.x0 + db * s_pxPerBar, s_drag.y0 + dl * pitch);
+        return;
+    }
+    if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+    s_drag.obj = nullptr;
+    /* Landed on the next turn of the LVGL loop: the move rebuilds the
+     * timeline, and with it the block whose event this is. */
+    static int s_landBars = 0, s_landLanes = 0;
+    s_landBars = code == LV_EVENT_RELEASED ? s_drag.dBars : 0;
+    s_landLanes = code == LV_EVENT_RELEASED ? s_drag.dLanes : 0;
+    lv_async_call([](void*) {
+        if (s_landBars) {
+            const int d = s_landBars;
+            edit_selected([d](crosspad::AudioSong&, crosspad::SongClip& c) {
+                c.bar = (uint32_t)std::max<int64_t>(0, (int64_t)c.bar + d);
+                return c;
+            });
+        }
+        for (int i = 0; i < std::abs(s_landLanes); ++i) move_track(s_landLanes > 0 ? 1 : -1);
+        if (!s_landBars && !s_landLanes) rebuild_timeline();
+        else leave_tools();
+    }, nullptr);
+}
+
 /// A copy straight after the block, which is how a part is repeated.
 void dup_cb(lv_event_t*)
 {
@@ -797,6 +876,16 @@ static void undo_redo(bool back)
     }
 }
 
+/// EDIT held: one step back at once, without the menu -- the move a player
+/// makes most after a take that went wrong.
+void edit_hold_cb(lv_event_t*)
+{
+    if (lv_indev_t* in = lv_indev_active()) lv_indev_wait_release(in);   // no CLICKED: the menu stays shut
+    auto* se = engine();
+    if (se && se->undoSteps()) undo_redo(true);
+    else                       note("Nothing to undo.");
+}
+
 void edit_cb(lv_event_t*)
 {
     auto* se = engine();
@@ -821,8 +910,8 @@ void edit_cb(lv_event_t*)
     overlay_list(title);
     /* What was just done, back or again, before anything new. */
     if (const uint32_t n = se->undoSteps()) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), LV_SYMBOL_LEFT " Undo   (%u)", (unsigned)n);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_LEFT " Undo   (%u)   or hold EDIT", (unsigned)n);
         overlay_item(buf, [](lv_event_t*) { undo_redo(true); }, nullptr);
     }
     if (const uint32_t n = se->redoSteps()) {

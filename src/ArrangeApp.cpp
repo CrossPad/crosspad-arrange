@@ -150,6 +150,28 @@ std::string track_kit(const crosspad::AudioSong& song, int t)
     return route == 1 ? song.tracks[t].kit : song.kit;
 }
 
+std::string track_title(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    if (!tr.name.empty()) return tr.name;
+    /* A kit track without a name of its own says its kit's: with two of
+     * them, which is which is the first thing to know. */
+    std::string kit = kit_name(track_kit(song, t));
+    if (!kit.empty()) return kit;
+    if (tr.kind == crosspad::TrackKind::Audio) return std::string("AUD ") + input_name(tr.input);
+    /* A Pitch track says the instrument the song names: its folder. */
+    if (tr.kind == crosspad::TrackKind::Seq && tr.source == crosspad::SeqSource::Pitch && !song.instrument.empty()) {
+        std::string p = song.instrument;
+        const size_t file = p.rfind("/instrument.json");
+        if (file != std::string::npos && file + 16 == p.size()) p.erase(file);
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        const size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) p.erase(0, slash + 1);
+        if (!p.empty()) return p;
+    }
+    return track_badge(tr);
+}
+
 lv_obj_t* s_root = nullptr;
 lv_obj_t* s_timeline = nullptr;
 lv_obj_t* s_playhead = nullptr;
@@ -468,6 +490,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
     place(s_followBtn, kCtxSong.follow, ARR_Y(35));
     s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
+    lv_obj_add_event_cb(s_editBtn, edit_hold_cb, LV_EVENT_LONG_PRESSED, nullptr);   // held: undo
     place(s_editBtn, 139, ARR_Y(35));
     s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
     place(s_syncBtn, 180, ARR_Y(35));

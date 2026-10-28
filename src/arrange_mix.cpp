@@ -25,10 +25,13 @@ static int32_t gain_to_fader(float g)
     return v < 1 ? 1 : (v > kFaderMax ? kFaderMax : v);
 }
 
+static lv_obj_t* s_mixFader[kTracks] = {};
+
 /// The MIX window's widgets go with it.
 void mix_forget()
 {
     for (int t = 0; t < kTracks; ++t) {
+        s_mixFader[t] = nullptr;
         s_mixDb[t] = s_mixMute[t] = s_mixSolo[t] = s_mixPan[t] = s_mixPanSlider[t] = nullptr;
         s_mixMeter[t][0] = s_mixMeter[t][1] = nullptr;
         s_mixShown[t][0] = s_mixShown[t][1] = 0.0f;
@@ -149,6 +152,16 @@ static void mix_pan_centre_cb(lv_event_t* e)
     mix_set_pan(t, 0);
 }
 
+/// A tap on the level's reading puts the fader back at 0 dB, as the pan's
+/// reading centres the pan.
+static void mix_unity_cb(lv_event_t* e)
+{
+    const int t = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s_mixFader[t]) return;
+    lv_slider_set_value(s_mixFader[t], kFaderUnity, LV_ANIM_OFF);
+    lv_obj_send_event(s_mixFader[t], LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
 /// M and S on a header, and in its menu. The timeline repaints from the
 /// song's shape on the next tick.
 void toggle_mute(int t)
@@ -244,8 +257,7 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_set_style_text_color(chip, tr.inUse ? kInk : kDim, 0);
     lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
     if (!tr.inUse)             set_text_fmt(chip, "%d  -", t + 1);
-    else if (!tr.name.empty()) set_text_fmt(chip, "%d %s", t + 1, tr.name.c_str());
-    else                       set_text_fmt(chip, "%d %s", t + 1, track_badge(tr));
+    else                       set_text_fmt(chip, "%d %s", t + 1, tr.name.c_str());
 
     /* Pan: the reading over a short slider from the centre out. */
     s_mixPan[t] = lv_label_create(strip);
@@ -307,6 +319,7 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_set_style_outline_width(s, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_ext_click_area(s, 12);
     lv_obj_add_event_cb(s, mix_fader_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)t);
+    s_mixFader[t] = s;
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s);
 #endif
@@ -321,6 +334,9 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_set_style_text_font(s_mixDb[t], &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_mixDb[t], kText, 0);
     lv_label_set_text(s_mixDb[t], "");
+    lv_obj_add_flag(s_mixDb[t], LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_mixDb[t], 6);
+    lv_obj_add_event_cb(s_mixDb[t], mix_unity_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
 
     lv_obj_t* ms = lv_obj_create(strip);
     lv_obj_remove_style_all(ms);
@@ -362,7 +378,7 @@ void mix_cb(lv_event_t*)
             tracks[t].inUse = src.inUse;
             tracks[t].kind = src.kind;
             tracks[t].source = src.source;
-            tracks[t].name = src.name;
+            tracks[t].name = src.inUse ? track_title(se->song(), t) : src.name;   // as its header says
             tracks[t].volume = src.volume;
             tracks[t].pan = src.pan;
         }

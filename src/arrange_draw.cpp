@@ -526,6 +526,8 @@ void rebuild_timeline()
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
+            for (lv_event_code_t ev : {LV_EVENT_LONG_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST})
+                lv_obj_add_event_cb(o, block_drag_cb, ev, (void*)(intptr_t)s_blockCount);
             /* An element has no waveform and no notes of its own to draw
              * here: it is a whole arrangement, baked. */
             if (!c.isElement()) {
@@ -657,15 +659,10 @@ void rebuild_timeline()
         s_trackQuiet[t] = song.silenced(t);
         set_ink(s_headNum[t], track_color(tr));
         if (s_headName[t]) {
-            /* A kit track without a name of its own says its kit's: with two
-             * of them, which is which is the first thing to know. */
-            const std::string kit = tr.name.empty() ? kit_name(track_kit(song, t)) : std::string();
-            char audioName[24];
-            std::snprintf(audioName, sizeof(audioName), "AUD %s", input_name(tr.input));
-            const char* name = !tr.name.empty()                       ? tr.name.c_str()
-                             : !kit.empty()                           ? kit.c_str()
-                             : tr.kind == crosspad::TrackKind::Audio ? audioName
-                                                                      : track_badge(tr);
+            const std::string title = track_title(song, t);
+            const char* name = title.c_str();
+            /* Dim while it has only its kind for a name. */
+            const bool named = !tr.name.empty() || !kit_name(track_kit(song, t)).empty();
             /* Frozen, it plays its file, not its engine (auto_freeze()). */
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
@@ -688,8 +685,20 @@ void rebuild_timeline()
             if (bouncing) set_text(s_headName[t], "BOUNCING...");
             else if (parked) set_text_fmt(s_headName[t], "PARKED %s", name);
             else set_text(s_headName[t], name);
+            /* A name that does not fit is set smaller, not cut: "VINTAG" and
+             * "sub_bas" were two kits nobody could tell apart. */
+            {
+                const char* shown = lv_label_get_text(s_headName[t]);
+                lv_point_t sz;
+                lv_text_get_size(&sz, shown, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                const lv_font_t* f = sz.x > lv_obj_get_width(s_headName[t]) ? &lv_font_montserrat_10 : &lv_font_montserrat_14;
+                if (lv_obj_get_style_text_font(s_headName[t], 0) != f) {
+                    lv_obj_set_style_text_font(s_headName[t], f, 0);
+                    lv_obj_set_y(s_headName[t], f == &lv_font_montserrat_14 ? 11 : 14);
+                }
+            }
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
-                                   : parked || s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
+                                   : parked || s_trackQuiet[t] || !named ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);

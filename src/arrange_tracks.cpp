@@ -832,6 +832,7 @@ void track_menu()
         input = t.input;
         kitTrack = seq && t.source == crosspad::SeqSource::Kit;
         if (kitTrack) kit = kit_name(track_kit(song, s_selTrack));
+        else if (seq) kit = song.instrument.empty() ? std::string() : track_title(song, s_selTrack);
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
     }
     overlay_keys(title);
@@ -839,6 +840,11 @@ void track_menu()
         char item[64];
         std::snprintf(item, sizeof(item), LV_SYMBOL_DRIVE " %s", kit.empty() ? "Kit ..." : kit.c_str());
         overlay_key(item, [](lv_event_t*) { close_overlay(); pick_kit_for(s_selTrack); });
+    } else if (seq) {
+        /* A Pitch track's instrument is picked, and played, in Pitch Play. */
+        char item[64];
+        std::snprintf(item, sizeof(item), LV_SYMBOL_AUDIO " %s", kit.empty() ? "Instrument ..." : kit.c_str());
+        overlay_key(item, [](lv_event_t*) { close_overlay(); open_seq_track(s_selTrack); });
     }
     overlay_key(armed ? LV_SYMBOL_OK " Armed" : LV_SYMBOL_PLUS " Arm for REC",
                 [](lv_event_t*) { close_overlay(); arm_track(s_selTrack); });
