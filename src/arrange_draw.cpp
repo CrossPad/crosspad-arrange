@@ -773,7 +773,7 @@ void rebuild_timeline()
                 lv_point_t sz;
                 lv_text_get_size(&sz, shownText.c_str(), &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
                 const lv_font_t* f = sz.x > lv_obj_get_width(s_headName[t]) ? &lv_font_montserrat_10 : &lv_font_montserrat_14;
-                if (lv_obj_get_style_text_font(s_headName[t], 0) != f) {
+                if (lv_obj_get_style_text_font(s_headName[t], LV_PART_MAIN) != f) {
                     lv_obj_set_style_text_font(s_headName[t], f, 0);
                     lv_obj_set_y(s_headName[t], f == &lv_font_montserrat_14 ? 11 : 14);
                     /* Too long even small: it ends in dots, so it reads as cut, not as a name. */
