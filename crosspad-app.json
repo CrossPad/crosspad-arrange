@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.27.0,<3.0.0",
+    "crosspad-core": ">=2.33.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.28.0: one kits' engine for every kit track (core 2.33) -- no Kit 2. Each kit track keeps its own kit; the armed one plays live, its kit the pads' and the Sampler's, the rest their freeze. ARM on another kit track, or a new one, hands the engine over only once the track it leaves is frozen: a new kit track stops the song, the old track freezes, then the new kit loads (an ARM while playing waits for the stop); CLIP EDIT arms the track and hands it over at once, so EDIT there edits that track's kit. A kit track still to be frozen gets the engine in turn while the song is stopped. A track's kit picked again is the song's too while it is live. Requires core 2.33.",
     "0.26.0: everything by itself (core 2.26). With the song stopped every seq track ARM is not on that is not frozen as it is freezes -- the one ARM left, one gone stale after a tempo turned or a kit loaded --, a failed freeze tried again later; an element block only the engine can bake (its kit tracks frozen at another tempo) is rebaked by itself after 3 s untouched, the note saying which and why, instead of waiting for EDIT > Rebake now; a Pitch sound that would not load is asked for again and said; the song list pages (24 a page, from the open song's, Back / More) so every song can be opened. Requires core 2.26.",
     "0.25.0: elements -- the song around them (core 2.25). With the song stopped and no pad played for 5 s Arrange tells the engine it may bake the other songs' blocks of an element changed since; a block whose element changed under it (a new tempo, a kit saved) plays as it was and says old until EDIT > Rebake now, which enters and leaves its element with the processing box over the lanes. A bake under way shows on its block. Requires core 2.25.",
     "0.24.0: elements -- arrangements inside the song (core 2.23). EDIT > New element here lays a four-bar element on a free audio track and opens it; Element from library lays one already made. An element block is ice blue with a layers glyph and its title (dimmed, not baked, until its first leave); CLIP EDIT on it opens it as the song, the context row becomes the breadcrumb SONG > ELEMENT 1 (three levels at most, ... for the rest, a tap goes up to that level), and the power button's click goes one level up, freezing and baking what changed, with the processing box saying how far. Requires core 2.23.",

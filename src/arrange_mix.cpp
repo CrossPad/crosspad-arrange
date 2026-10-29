@@ -178,11 +178,13 @@ void toggle_solo(int t)
 }
 
 /// ARM: REC takes onto @p t -- a seq track's pads, whose kit they then play
-/// here, or an audio track's input.
+/// here, or an audio track's input. A kit track gets the kits' engine from
+/// live_kit(), after the one it leaves is frozen -- once the song stops.
 void arm_track(int t)
 {
     auto* se = engine();
     if (!se || t < 0 || t >= kTracks) return;
+    int waitsFor = -1;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();
@@ -190,9 +192,14 @@ void arm_track(int t)
         const bool audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
         if ((song.seqRoute(t) < 0 && !audio) || song.armed == t) return;
         song.armed = (int8_t)t;
+        if (song.seqRoute(t) == 0 && song.seqRoute(song.liveKit) == 0) waitsFor = song.liveKit;
     }
     se->commit();
     rebuild_timeline();
+    if (waitsFor >= 0 && waitsFor != t && se->freezeState((uint8_t)waitsFor) != crosspad::FreezeState::Frozen) {
+        note_fmt(se->playing() ? "Track %d armed: its kit comes in once the song stops and track %d is frozen."
+                               : "Track %d armed: track %d freezes first, then its kit loads.", t + 1, waitsFor + 1);
+    }
 }
 
 /// A thin vertical bar for a meter: taller than wide, LVGL fills it upwards.

@@ -24,7 +24,6 @@
 #include "crosspad/instrument/InstrumentPlayState.hpp"
 #include "crosspad/kit/IKitManager.hpp"
 #include "crosspad/kit/IKitPicker.hpp"
-#include "crosspad/sampler/ISecondKit.hpp"
 #include "crosspad/pad/PadManager.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/song/ArrangeAudioTake.hpp"
@@ -136,8 +135,8 @@ inline const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
  * Arrange holds kTracks tracks, any of them seqs (a scene each): kit tracks, a
- * kit each, taking turns on the second kit engine and playing their freeze
- * while they wait (kit_slot()), and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
+ * kit each, taking turns on the kits' engine -- the armed one plays live, the
+ * others their freeze (live_kit()) --, and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
  * the "+ ADD TRACK" row -- AUDIO is recorded into here, KITS asks for Perf,
  * Drums, Slice or Pitch, also recorded into here -- and any track
  * can be bounced to audio at any time, which is also how a seq slot is freed
@@ -186,9 +185,6 @@ struct Block {
 
 /* A Pitch seq track's sound (sound_keeper_cb, by Arrange_create). */
 inline constexpr const char* kSoundLogic = "ArrangePitch";
-
-/* The second kit's pads, while its track is armed (sound_keeper_cb). */
-inline constexpr const char* kKit2Logic = "ArrangeKit2";
 
 /* MOVE, DUP, DEL (the selected block's, reached by clicking it), then EDIT. */
 inline constexpr int kBlockTools = 3;
@@ -253,7 +249,6 @@ extern uint8_t   s_seqLaneScene;
 extern uint32_t  s_seqTicksBar;
 extern uint32_t  s_drawnBars;
 extern int       s_bouncing;
-extern bool        s_kit2Pads;
 extern lv_timer_t* s_soundTimer;
 extern bool        s_visible;
 extern bool        s_soundHeld;

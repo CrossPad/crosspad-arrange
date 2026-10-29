@@ -21,7 +21,7 @@
  * onto the armed seq track from there -- ARM, the dot on a track's header,
  * which on a seq track is also whose kit the pads play here; on an audio
  * track REC records its input instead, and there is no DUB (ISongEngine::recordSeq,
- * AudioSong::armed; SecondKitPadLogic for the second kit): a REC becomes a
+ * AudioSong::armed, whose kit the kits' engine plays, AudioSong::liveKit): a REC becomes a
  * block of its own notes as many bars long as it ran -- a STOP puts the
  * playhead back on bar one, the next PLAY's downbeat -- and a DUB adds
  * to the blocks it plays over; with LOOP over a region the take goes round
@@ -141,13 +141,10 @@ std::string kit_name(const std::string& kitPath)
     return {};
 }
 
-/// The kit seq track @p t plays: its own on the second kit's route, else the
-/// song's. Empty for any other track.
+/// The kit seq track @p t plays. Empty for any other track.
 std::string track_kit(const crosspad::AudioSong& song, int t)
 {
-    const int route = song.seqRoute(t);
-    if (route < 0 || song.tracks[t].source != crosspad::SeqSource::Kit) return {};
-    return route == 1 ? song.tracks[t].kit : song.kit;
+    return song.seqRoute(t) == 0 ? song.tracks[t].kit : std::string();
 }
 
 lv_obj_t* s_root = nullptr;
@@ -227,7 +224,6 @@ uint32_t  s_drawnBars = 0;
 /* The track whose bounce is running, so its kind is flipped when the WAV
  * lands and not a moment before: until then the notes are still what plays. */
 int       s_bouncing = -1;
-bool        s_kit2Pads     = false;   ///< kKit2Logic is pushed
 lv_timer_t* s_soundTimer   = nullptr;
 bool        s_visible      = false;   ///< this screen is the one on top
 bool        s_soundHeld    = false;   ///< the instrument was borrowed for the song
@@ -824,10 +820,6 @@ void Arrange_destroy(lv_obj_t* root)
         crosspad::getPadManager().popPadLogic();
     }
     s_soundPads = false;
-    if (s_kit2Pads && crosspad::getPadManager().getActivePadLogic() == kKit2Logic) {
-        crosspad::getPadManager().popPadLogic();
-    }
-    s_kit2Pads = false;
     /* The song keeps playing when the screen closes -- it is the song
      * engine's, not this screen's. Only the widgets go. */
 #ifdef ARR_USE_ENCODER

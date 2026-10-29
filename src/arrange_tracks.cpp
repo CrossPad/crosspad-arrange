@@ -239,6 +239,17 @@ void seq_track_made(int made)
 {
     select(made, -1);
     rebuild_timeline();
+    auto* se = engine();
+    int holder = -1;
+    if (se) {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        if (song.seqRoute(made) == 0 && song.seqRoute(song.liveKit) == 0 && song.liveKit != made) holder = song.liveKit;
+    }
+    if (holder >= 0 && se->freezeState((uint8_t)holder) != crosspad::FreezeState::Frozen) {
+        note_fmt("Track %d armed: track %d freezes first, then its kit loads.", made + 1, holder + 1);
+        return;
+    }
     note_fmt("Track %d armed: REC records the pads, CLIP EDIT opens its seq view.", made + 1);
 }
 
@@ -269,13 +280,11 @@ static void choose_source_cb(lv_event_t* e)
 // ── a kit track's kit ──────────────────────────────────────────────────────
 /*
  * The kit loader -- the board's kit browser (IKitPicker) -- for a new kit
- * track or one whose kit changes. On the pads' route (the first kit track)
- * the kit picked is the song's -- what the pads and the Sampler play, loaded
- * as a song's kit is; on the second it is the track's own, which the second
- * kit engine loads beside it. A pitched kit has an engine of its own that
- * takes the arena from both, so it is no second kit. The browser is up while
- * this screen is down: the pick changes the song, and the screen, back, picks
- * the new track (s_afterPick).
+ * track or one whose kit changes. The kit picked is the track's; while the
+ * track is the live one (AudioSong::liveKit) it is the song's too -- what the
+ * pads and the Sampler play, loaded as a song's kit is. The browser is up
+ * while this screen is down: the pick changes the song, and the screen, back,
+ * picks the new track (s_afterPick).
  */
 
 static int s_kitPickTrack = -1;   ///< the track the kit loader picks for; -1 a new one
@@ -285,36 +294,21 @@ static void kit_picked(const std::string& path, void*)
 {
     auto* se = engine();
     if (!se) return;
-    crosspad::IKitManager* km = crosspad::getKitManager();
-    bool pitched = false;
-    for (int i = 0; km && i < km->getKitCount(); ++i) {
-        const crosspad::KitInfo* k = km->getKit(i);
-        if (k && k->path == path) pitched = k->engine == crosspad::KitEngine::Pitched;
-    }
     const int track = s_kitPickTrack;
-    bool second = false;   // a second kit plays beside this one, or would be this one
-    {
-        std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& song = se->song();
-        const int route = track < 0 ? song.freeSeqRoute(crosspad::SeqSource::Kit) : song.seqRoute(track);
-        second = route == 1 || song.seqTrackOnRoute(1) >= 0;
-    }
-    /* A toast, not this screen's note: the screen is down while the loader is up. */
-    if (pitched && second) {
-        ui_toast_show("A pitched kit plays alone: it cannot be a second kit.", 3000, UI_TOAST_WARNING);
-        return;
-    }
     if (track < 0) {
+        /* A new kit track: the song stops, the track holding the kits' engine
+         * is frozen, then the new kit loads (live_kit()). */
+        if (se->playing()) se->stop();
         s_afterPick = make_seq_track(crosspad::SeqSource::Kit, path);
+        /* A toast, not this screen's note: the screen is down while the loader is up. */
         if (s_afterPick < 0) ui_toast_show("No room: all tracks or all eight scenes are in use.", 3000, UI_TOAST_WARNING);
         return;
     }
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         auto& song = se->song();
-        if (song.seqRoute(track) == 1)      song.tracks[track].kit = path;
-        else if (song.seqRoute(track) == 0) song.kit = path;
-        else                                return;
+        if (song.seqRoute(track) != 0) return;
+        song.setTrackKit(track, path);
     }
     se->commit();
 }
@@ -343,7 +337,9 @@ static void pick_kit_for(int track, crosspad::KitList list)
 /// A seq track's screen, on its scene and knowing it came from here: a Pitch
 /// track opens in Pitch Play -- the very screen the MODE map's Pitch opens,
 /// which takes the transport for this scene so REC and DUB record what is
-/// played on its keys -- and a kit track in the sequencer's seq view.
+/// played on its keys -- and a kit track in the sequencer's seq view, armed
+/// and given the kits' engine at once: what the pads play there, and what
+/// the Sampler's EDIT edits, is this track's kit.
 static void open_seq_track(int track)
 {
     auto* se = engine();
@@ -366,6 +362,11 @@ static void open_seq_track(int track)
                 t.scene = (uint8_t)scene;
                 moved = true;
             }
+        }
+        if (t.source == crosspad::SeqSource::Kit) {
+            se->song().armed = (int8_t)track;
+            se->song().setLiveKit(track);
+            moved = true;
         }
         f.clear();
         f.track  = track;
@@ -451,8 +452,7 @@ static void seq_source_sheet()
     sheet_tile(164, 1, "PITCH PLAY", "Pitch", pitch ? "melody, 4 voices" : "slot taken",
                kPitchT, pitch, choose_source_cb, (void*)(intptr_t)NewSeq::Pitch);
 
-    sheet_rules(kitRoute == 1 ? "A kit of its own: plays live armed, frozen when not."
-                              : "A kit track: pick its kit, then REC records into it.",
+    sheet_rules("A kit of its own: plays live armed, frozen when not.",
                 "Bounce turns a track into audio and frees its slot.");
     static const char* kLabels[] = {LV_SYMBOL_LEFT " BACK", "CANCEL"};
     static const lv_event_cb_t kCbs[] = {back_to_add_cb, cancel_sheet_cb};
@@ -467,27 +467,28 @@ static void bounce_go_cb(lv_event_t*)
     if (!se) return;
     /* A Pitch track is bounced through its instrument, so it has to be in:
      * notes before the bank is built would be silence in the clip. */
-    bool pitch = false, second = false, parked = false;
-    std::string ownKit;
+    bool pitch = false, kit = false, parked = false;
+    std::string trackKit;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
         pitch = song.tracks[track].source == crosspad::SeqSource::Pitch;
-        second = song.seqRoute(track) == 1;
-        parked = second && song.liveRoute(track) < 0;
-        ownKit = song.tracks[track].kit;
+        kit = song.seqRoute(track) == 0;
+        parked = kit && song.liveRoute(track) < 0;
+        trackKit = song.tracks[track].kit;
     }
     if (parked) {
-        note("The second kit plays another track now -- ARM this one, then BOUNCE.");
+        note("The kits' engine plays another track now -- ARM this one, then BOUNCE.");
         return;
     }
     if (pitch && !crosspad::seqTrackSound().pitch.ready()) {
         note("The track's instrument is still loading -- BOUNCE again in a moment.");
         return;
     }
-    /* The second kit is bounced through its engine, which loads on its own. */
-    crosspad::ISecondKit* kit2 = crosspad::getPlatformServices().secondKit;
-    if (second && (!kit2 || kit2->state() != crosspad::ISecondKit::State::Ready || kit2->kit() != ownKit)) {
+    /* A kit track is bounced through the kits' engine, once its kit is in. */
+    crosspad::IKitManager* km = crosspad::getKitManager();
+    const crosspad::KitInfo* cur = km ? km->getCurrentKit() : nullptr;
+    if (kit && (!cur || cur->path != trackKit)) {
         note("The track's kit is still loading -- BOUNCE again in a moment.");
         return;
     }

@@ -623,9 +623,9 @@ void rebuild_timeline()
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
-            /* A kit of its own the second kit engine is not playing, and no
-             * freeze to play instead: silent until one is made (kit_slot()). */
-            const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 1 &&
+            /* A kit track the kits' engine is not playing, and no freeze to
+             * play instead: silent until one is made (live_kit()). */
+            const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 0 &&
                                 song.liveRoute(t) < 0;
             /* A snowflake says frozen, and a faint one freezing: the name
              * stays readable beside it instead of losing its start to "FRZ". */
