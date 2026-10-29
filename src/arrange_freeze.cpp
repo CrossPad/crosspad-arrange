@@ -2,6 +2,7 @@
 // auto-freeze of the seq tracks ARM is not on, and which kit track the kits' engine plays.
 
 #include "arrange_internal.hpp"
+#include "crosspad/song/SongSounds.hpp"
 
 #include "crosspad/song/AutoFreeze.hpp"
 
@@ -48,6 +49,8 @@ static bool song_has_pitch_track()
  * later, later still each time (crosspad::RetryBackoff). A song opened carries
  * nothing over. */
 static std::string s_freezeSong;
+/// How long a mixdown waits for a kit track's kit to come into the kits' engine.
+constexpr uint32_t kExportWaitMs = 20000;
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
 static crosspad::RetryBackoff s_freezeRetry[kTracks];   ///< after a failed freeze, on lv_tick
 static uint64_t    s_freezeShown = UINT64_MAX;   ///< freezeState() of each track, two bits, as last drawn
@@ -128,6 +131,10 @@ static void auto_freeze(crosspad::ISongEngine* se)
     if (dir != s_freezeSong) {
         s_freezeSong = dir;
         s_freezeRunning = -1;
+        if (s_exportWav) {
+            s_exportWav = false;          // asked of the song that was open, not of this one
+            note("No mix: another song was opened.");
+        }
         for (auto& r : s_freezeRetry) r.reset();
     }
 
@@ -148,6 +155,47 @@ static void auto_freeze(crosspad::ISongEngine* se)
     /* Never under a render: the kit it renders through would change. */
     const bool canFreeze = s_visible && !bouncing && !se->playing() && s_freezeRunning < 0;
     if (!bouncing && s_freezeRunning < 0) live_kit(se, st, skip, canFreeze);
+    /* A mixdown asked for: every seq track that is heard frozen -- the armed
+     * one too, which auto-freeze leaves live -- then the mix is written. */
+    if (s_exportWav && !bouncing && !se->playing() && s_freezeRunning < 0 &&
+        se->editState() != crosspad::SongOpState::Busy) {
+        int next = -1, stuck = -1;
+        bool waiting = false;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            const auto& song = se->song();
+            for (int t = 0; t < kTracks && next < 0; ++t) {
+                const auto& tr = song.tracks[t];
+                if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq || song.silenced(t) || song.seqPlaysNothing(t) ||
+                    st[t] == crosspad::FreezeState::Frozen) continue;
+                /* Its sound must be in an engine first, or the freeze is of
+                 * silence or of another kit: waited for, as live_kit() hands
+                 * the kits' engine to each track still to freeze. */
+                if (song.liveRoute(t) < 0 || !engine_holds(song, t)) { waiting = true; continue; }
+                if (skip & (1u << t)) stuck = t;
+                else                  next = t;
+            }
+        }
+        const bool engineComing = next < 0 && waiting && now - s_exportAskedMs < kExportWaitMs;
+        if (next < 0 && waiting && !engineComing) stuck = 0;
+        if (engineComing) {
+            /* the engine on its way: asked again on the next tick */
+        } else if (next >= 0) {
+            if (se->freezeTrack((uint8_t)next)) s_freezeRunning = next;
+            else                                s_freezeRetry[next].failed(now);
+        } else if (stuck >= 0) {
+            s_exportWav = false;
+            if (waiting) note("No mix: a kit track's kit did not load in time -- try again.");
+            else         note_fmt("No mix: track %d would not freeze (its sound is not loaded?).", stuck + 1);
+        } else {
+            s_exportWav = false;
+            if (se->requestExportWav()) {
+                s_editing = true;
+                s_editKind = EditKind::ExportWav;
+                note("Writing the mix ...");
+            }
+        }
+    }
     if (canFreeze) {
         int next = -1;
         {
@@ -173,22 +221,20 @@ static void auto_freeze(crosspad::ISongEngine* se)
     }
 }
 
-/// The processing box's text for a freeze Arrange started, while it runs:
-/// the track, the renders through of those its plan needs (core finds the
-/// ones it has on the card and renders only the rest) and how far the whole
-/// is. False when no freeze of ours runs.
-bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap)
+/// A freeze Arrange started, while it runs: the track and how far the whole
+/// is -- the renders through of those its plan needs (core finds the ones it
+/// has on the card and renders only the rest). False when no freeze of ours
+/// runs.
+bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct)
 {
     /* A bounce from BOUNCE is a freeze whose renders become the track's
-     * audio (core 2.14): the same box, the same count. */
-    const int track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
+     * audio (core 2.14): the same count. */
+    track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
     if (!se || track < 0 || se->freezeState((uint8_t)track) != crosspad::FreezeState::Freezing) return false;
     const crosspad::BounceStatus st = se->bounceStatus();
     const uint32_t pieces = st.pieces ? st.pieces : 1;
     const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
-    const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
-    std::snprintf(buf, cap, "%s TRACK %d\nrender %u of %u  -  %u%%", s_bouncing >= 0 ? "BOUNCING" : "FREEZING",
-                  track + 1, (unsigned)std::min<uint32_t>(st.piecesDone + 1, pieces), (unsigned)pieces, pct);
+    pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
     return true;
 }
 
@@ -205,7 +251,10 @@ void sound_keeper_cb(lv_timer_t*)
     auto_freeze(se);
     const bool playing = se && se->playing();
     const std::string path = crosspad::instrumentPlayState().instrumentPath;
-    const bool want = host && !path.empty() && song_has_pitch_track() &&
+    /* Not while a song's sounds are still coming: the path is then the last
+     * song's, and SongSounds is loading this one's. */
+    const crosspad::SongSounds* sounds = crosspad::getPlatformServices().songSounds;
+    const bool want = host && !path.empty() && song_has_pitch_track() && !(sounds && sounds->pending()) &&
                       (s_visible || playing || s_soundBounce);
 
     if (want) {

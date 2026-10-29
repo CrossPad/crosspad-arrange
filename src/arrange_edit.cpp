@@ -288,6 +288,110 @@ static void move_arrow_cb(lv_event_t* e)
     }, (void*)(intptr_t)d);
 }
 
+/* A block held, then dragged: it follows the finger, snapped to bars and to
+ * lanes, and lands where it is let go -- the move a finger expects, where
+ * MOVE's arrows took a tap a bar. */
+static struct {
+    lv_obj_t*  obj = nullptr;
+    lv_point_t start{};
+    int32_t    x0 = 0, y0 = 0;
+    int        bar0 = 0, track0 = 0;
+    int        dBars = 0;
+    int        land = 0;                  ///< the lane it would land on
+    std::vector<int> lanes;               ///< the lanes it can land on (move_target()), its own first
+} s_drag;
+
+void drag_forget()
+{
+    s_drag.obj = nullptr;
+    s_drag.dBars = 0;
+    s_drag.lanes.clear();
+}
+
+void block_drag_cb(lv_event_t* e)
+{
+    lv_obj_t* o = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t* in = lv_indev_active();
+    if (code == LV_EVENT_LONG_PRESSED) {
+        const int k = (int)(intptr_t)lv_event_get_user_data(e);
+        auto* se = engine();
+        if (!se || !in || k < 0 || k >= s_blockCount || se->seqTake() != crosspad::SyncTake::None) return;
+        select(s_blocks[k].track, s_blocks[k].index);
+        s_drag = {};
+        s_drag.obj = o;
+        lv_indev_get_point(in, &s_drag.start);
+        s_drag.x0 = lv_obj_get_x(o);
+        s_drag.y0 = lv_obj_get_y(o);
+        s_drag.track0 = s_drag.land = s_blocks[k].track;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            const auto& song = se->song();
+            const auto& cs = song.tracks[s_selTrack].clips;
+            s_drag.bar0 = s_selIndex >= 0 && s_selIndex < (int)cs.size() ? (int)cs[(size_t)s_selIndex].bar : 0;
+            /* Only the lanes MOVE would take it to: a lane of another kind
+             * is passed over, and the preview must not promise one. */
+            s_drag.lanes.push_back(s_drag.track0);
+            for (int dir : {-1, +1})
+                for (int t = move_target(song, s_drag.track0, dir); t >= 0; t = move_target(song, t, dir))
+                    s_drag.lanes.push_back(t);
+        }
+        /* The lanes must not scroll under the finger that carries the block. */
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_obj_add_flag(o, LV_OBJ_FLAG_PRESS_LOCK);    // still its press when the finger runs ahead of it
+        lv_obj_set_style_outline_color(o, kHead, 0);
+        lv_obj_set_style_outline_width(o, 2, 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_70, 0);
+        lv_obj_move_foreground(o);
+        return;
+    }
+    if (!s_drag.obj || o != s_drag.obj || !in) return;
+    if (code == LV_EVENT_PRESSING) {
+        lv_point_t p;
+        lv_indev_get_point(in, &p);
+        const int32_t pitch = kLaneH + kLaneGap;
+        const int32_t dx = p.x - s_drag.start.x, dy = p.y - s_drag.start.y;
+        int db = (int)((dx + (dx >= 0 ? s_pxPerBar / 2 : -s_pxPerBar / 2)) / std::max<int32_t>(1, s_pxPerBar));
+        db = std::max(db, -s_drag.bar0);
+        /* The lane it can land on nearest the finger. */
+        const int want = s_drag.track0 + (int)((dy + (dy >= 0 ? pitch / 2 : -pitch / 2)) / pitch);
+        int land = s_drag.track0;
+        for (int t : s_drag.lanes)
+            if (std::abs(t - want) < std::abs(land - want)) land = t;
+        if (db == s_drag.dBars && land == s_drag.land) return;
+        s_drag.dBars = db;
+        s_drag.land = land;
+        lv_obj_set_pos(o, s_drag.x0 + db * s_pxPerBar, s_drag.y0 + (land - s_drag.track0) * pitch);
+        return;
+    }
+    if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+    /* Landed on the next turn of the LVGL loop: the move rebuilds the
+     * timeline, and with it the block whose event this is. */
+    static int s_landBars = 0, s_landTrack = -1;
+    s_landBars = code == LV_EVENT_RELEASED ? s_drag.dBars : 0;
+    s_landTrack = code == LV_EVENT_RELEASED ? s_drag.land : s_drag.track0;
+    const int from = s_drag.track0;
+    drag_forget();
+    lv_async_call([](void* p) {
+        const int start = (int)(intptr_t)p;
+        if (s_landBars) {
+            const int d = s_landBars;
+            edit_selected([d](crosspad::AudioSong&, crosspad::SongClip& c) {
+                c.bar = (uint32_t)std::max<int64_t>(0, (int64_t)c.bar + d);
+                return c;
+            });
+        }
+        /* Step by step through the lanes MOVE takes it to, as many as the drop asked. */
+        for (int i = 0; i < kTracks && s_selTrack != s_landTrack; ++i) {
+            const int was = s_selTrack;
+            move_track(s_landTrack > s_selTrack ? 1 : -1);
+            if (s_selTrack == was) break;
+        }
+        if (!s_landBars && s_landTrack == start) rebuild_timeline();
+        else leave_tools();
+    }, (void*)(intptr_t)from);
+}
+
 /// A copy straight after the block, which is how a part is repeated.
 void dup_cb(lv_event_t*)
 {
@@ -353,29 +457,30 @@ bool back_handler(lv_obj_t*)
     return elements_back();
 }
 
-/// A long press on a track's header: an audio track's input (with MIX beside
-/// it in the same sheet), MIX straight away on any other.
+/// A track header held: its mute, at once -- the one move a player makes
+/// mid-song with no time for a menu. Levels are MIX's (the key beside the
+/// song's name), an audio track's input its menu's.
 void head_hold_cb(lv_event_t* e)
 {
     auto* se = engine();
     if (!se) return;
     const int t = (int)(intptr_t)lv_event_get_user_data(e);
-    bool audio = false;
+    if (lv_indev_t* in = lv_indev_active()) lv_indev_wait_release(in);   // no CLICKED: no menu after it
+    toggle_mute(t);
+    bool muted = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        const auto& tr = se->song().tracks[t];
-        audio = tr.inUse && tr.kind == crosspad::TrackKind::Audio;
+        muted = se->song().tracks[t].muted;
     }
-    if (audio) input_sheet(t);
-    else       mix_cb(e);
+    rebuild_timeline();
+    note_fmt("Track %d %s.", t + 1, muted ? "muted" : "on again");
 }
 
 /// A track header picks the track and opens its menu -- BOUNCE and DELETE,
 /// what acts on a track rather than on a block. EDIT acts on the one picked,
 /// and a seq track that loops over the whole song has no block to click, so
-/// this is the only way to reach it -- which is why the click does not mute.
-/// Mute is the M button in MIX (a long press on the same header), where the
-/// levels are.
+/// this is the only way to reach it -- which is why the click does not mute;
+/// holding it does (head_hold_cb()).
 void head_cb(lv_event_t* e)
 {
     auto* se = engine();
@@ -388,6 +493,9 @@ void head_cb(lv_event_t* e)
         if (!tr.inUse) return;
         index = s_selTrack == t ? s_selIndex : (tr.clips.empty() ? -1 : 0);
     }
+    /* A header picks its track, for ARM, mute or its menu: PLAY and REC
+     * still start where the player put the song, not at its first block. */
+    s_selQuiet = true;
     select(t, index);
     /* The release of a hold that opened MIX is a click too; MIX is up then. */
     track_menu();
@@ -583,6 +691,7 @@ static void region_copy_cb(lv_event_t*)
         const uint32_t spb = prepare_bar_edit(song);
         s_clipboard = song.copyRange(song.loopStart, song.loopEnd, spb);
         s_clipboardBars = song.loopEnd - song.loopStart;
+        s_clipboardDir = song.dir;
     });
 }
 
@@ -591,7 +700,7 @@ static void region_copy_cb(lv_event_t*)
 static void region_paste_cb(lv_event_t*)
 {
     region_edit([](crosspad::AudioSong& song) {
-        if (s_clipboard.empty() || !s_clipboardBars) return;
+        if (s_clipboard.empty() || !s_clipboardBars || s_clipboardDir != song.dir) return;
         const uint32_t spb = prepare_bar_edit(song);
         song.insertBars(song.loopStart, s_clipboardBars, spb);
         song.pasteRange(s_clipboard, song.loopStart);
@@ -612,6 +721,67 @@ static void region_dup_cb(lv_event_t*)
         song.pasteRange(part, song.loopEnd);
         song.loopEnd += w;
     });
+}
+
+/// The selected seq block taken again: the loop region round it, its track
+/// armed, REC from its first bar (counted in as the pattern's PRE says).
+static void rerecord_cb(lv_event_t*)
+{
+    auto* se = engine();
+    close_overlay();
+    if (!se) return;
+    if (take_running(se)) { note("STOP the take first, then take this block again."); return; }
+    const int t = s_selTrack;
+    uint32_t bar = 0, bars = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        const auto& cs = song.tracks[t].clips;
+        if (s_selIndex < 0 || s_selIndex >= (int)cs.size()) return;
+        bar = cs[(size_t)s_selIndex].bar;
+        bars = cs[(size_t)s_selIndex].bars;
+        song.loopStart = bar;
+        song.loopEnd = bar + bars;
+        song.loop = true;
+    }
+    se->commit();
+    if (se->playing()) crosspad::songTransport().stop();
+    arm_track(t);
+    crosspad::songTransport().setStartBar(bar);
+    crosspad::songTransport().record();
+    sync_transport();
+    note_fmt("Take again: bars %u - %u go round until STOP; then hold EDIT to undo a pass.",
+             (unsigned)bar + 1, (unsigned)(bar + bars));
+}
+
+/// Room the length of the region before it: everything from its start on
+/// moves later, the region with it.
+static void region_insert_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        const uint32_t w = song.loopEnd - song.loopStart;
+        song.insertBars(song.loopStart, w, prepare_bar_edit(song));
+        song.loopStart += w;
+        song.loopEnd += w;
+    });
+    note("Empty bars in; the region moved on with the song.");
+}
+
+/// The region out of the song, and what came after it closed up.
+static void region_delete_cb(lv_event_t*)
+{
+    region_edit([](crosspad::AudioSong& song) {
+        song.deleteBars(song.loopStart, song.loopEnd, prepare_bar_edit(song));
+    });
+    note("Bars deleted -- hold EDIT to undo.");
+}
+
+/// Four empty bars at the playhead (no region to size them).
+static void insert_bars_cb(lv_event_t*)
+{
+    const uint32_t at = playhead_bar();
+    region_edit([at](crosspad::AudioSong& song) { song.insertBars(at, 4, prepare_bar_edit(song)); });
+    note_fmt("4 empty bars at bar %u.", (unsigned)at + 1);
 }
 
 /// The bar the playhead is on: where the song is while it plays, where PLAY
@@ -792,26 +962,42 @@ static void undo_redo(bool back)
     if (back ? se->undo() : se->redo()) {
         select(s_selTrack, -1);
         note(back ? "Undone." : "Redone.");
+    } else if (take_running(se)) {
+        note("STOP the take first: then hold EDIT to undo a pass.");
     } else {
         note("Not now: a merge, a bounce or a new tempo is still being written.");
     }
+}
+
+/// EDIT held: one step back at once, without the menu -- the move a player
+/// makes most after a take that went wrong.
+void edit_hold_cb(lv_event_t*)
+{
+    if (lv_indev_t* in = lv_indev_active()) lv_indev_wait_release(in);   // no CLICKED: the menu stays shut
+    auto* se = engine();
+    if (se && se->undoSteps()) undo_redo(true);
+    else                       note("Nothing to undo.");
 }
 
 void edit_cb(lv_event_t*)
 {
     auto* se = engine();
     if (!se || s_overlay || s_merging) return;
-    bool region = false, block = false, tracked = false, stale = false;
+    bool region = false, block = false, tracked = false, stale = false, seqBlock = false, paste = false;
     uint32_t a = 0, b = 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
+        /* Copied bars name their files in clips/ of the song they came from:
+         * pasted in another (or an element) they would be missing. */
+        paste = !s_clipboard.empty() && s_clipboardDir == song.dir;
         tracked = song.tracks[s_selTrack].inUse;
         region = song.hasRegion();
         a = song.loopStart;
         b = song.loopEnd;
         const auto& cs = song.tracks[s_selTrack].clips;
         block = s_selIndex >= 0 && s_selIndex < (int)cs.size();
+        seqBlock = block && !cs[(size_t)s_selIndex].isElement() && song.seqRoute(s_selTrack) >= 0;
         stale = block && cs[(size_t)s_selIndex].isElement()
                 && se->elementClipState((uint8_t)s_selTrack, (size_t)s_selIndex) == crosspad::ElementClipState::Stale;
     }
@@ -821,8 +1007,8 @@ void edit_cb(lv_event_t*)
     overlay_list(title);
     /* What was just done, back or again, before anything new. */
     if (const uint32_t n = se->undoSteps()) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), LV_SYMBOL_LEFT " Undo   (%u)", (unsigned)n);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_LEFT " Undo   (%u)   or hold EDIT", (unsigned)n);
         overlay_item(buf, [](lv_event_t*) { undo_redo(true); }, nullptr);
     }
     if (const uint32_t n = se->redoSteps()) {
@@ -834,6 +1020,10 @@ void edit_cb(lv_event_t*)
      * it was the "+ ADD" key before the export's row gave that slot to EDIT
      * and BOUNCE. A track is normally filled by recording into it; this is
      * for a clip the project already has. */
+    /* Not a note editor -- the screen is too small for one -- but the take
+     * again, round the block until it is right: the first pass replaces it,
+     * the next ones are dubbed in, and EDIT held undoes a pass gone wrong. */
+    if (seqBlock) overlay_item(LV_SYMBOL_REFRESH " Record this block again", rerecord_cb, nullptr);
     overlay_item(LV_SYMBOL_PLUS " Add a clip from the library ...",
                  [](lv_event_t* e) { close_overlay(); add_cb(e); }, nullptr);
     overlay_item(LV_SYMBOL_PLUS " New element here", element_new_cb, nullptr);
@@ -851,11 +1041,16 @@ void edit_cb(lv_event_t*)
         overlay_item(LV_SYMBOL_COPY " Copy the region", region_copy_cb, nullptr);
         overlay_item(LV_SYMBOL_LIST " Make element from region", element_region_cb, nullptr);
         char buf[64];
-        if (!s_clipboard.empty()) {
+        if (paste) {
             std::snprintf(buf, sizeof(buf), LV_SYMBOL_PASTE " Paste %u bars at the region", (unsigned)s_clipboardBars);
             overlay_item(buf, region_paste_cb, nullptr);
         }
         overlay_item(LV_SYMBOL_PLUS " Duplicate the region  x2", region_dup_cb, nullptr);
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_PLUS " Insert %u empty bars at the region", (unsigned)(b - a));
+        overlay_item(buf, region_insert_cb, nullptr);
+        overlay_item(LV_SYMBOL_CUT " Delete the region, close the gap", region_delete_cb, nullptr);
+    } else {
+        overlay_item(LV_SYMBOL_PLUS " Insert 4 empty bars at the playhead", insert_bars_cb, nullptr);
     }
     overlay_item(LV_SYMBOL_SHUFFLE " Merge tracks ...", merge_tracks_cb, nullptr);
     overlay_item(LV_SYMBOL_SHUFFLE " Merge all tracks into one", merge_all_cb, nullptr);

@@ -148,6 +148,7 @@ static void sheet_keys(const char* const* labels, const lv_event_cb_t* cbs, int 
 static void new_track_sheet();
 static void seq_source_sheet();
 static void open_seq_track(int track);
+static bool tracks_held(crosspad::ISongEngine* se);
 static void pick_kit_for(int track, crosspad::KitList list = crosspad::KitList::Any);
 
 /// Is the selected track one that holds a seq? What a bounce needs.
@@ -186,7 +187,7 @@ static void choose_audio_cb(lv_event_t*)
     select(made, -1);
     rebuild_timeline();
     if (crosspad::getPlatformServices().sampleTools) {
-        note_fmt("Track %d armed: REC records the mics into it. Hold its header for another input.", made + 1);
+        note_fmt("Track %d armed: REC records the mics into it. Tap its header for another input.", made + 1);
     } else {
         note_fmt("Track %d added. No recorder in this firmware -- EDIT it to add a clip.", made + 1);
     }
@@ -334,7 +335,7 @@ static void pick_kit_for(int track, crosspad::KitList list)
     }, nullptr);
 }
 
-/// A seq track's screen, on its scene and knowing it came from here: a Pitch
+/// A seq track's screen, armed, on its scene and knowing it came from here: a Pitch
 /// track opens in Pitch Play -- the very screen the MODE map's Pitch opens,
 /// which takes the transport for this scene so REC and DUB record what is
 /// played on its keys -- and a kit track in the sequencer's seq view, armed
@@ -379,6 +380,9 @@ static void open_seq_track(int track)
         f.bar = picked ? t.clips[(size_t)s_selIndex].bar : playhead_bar();
     }
     if (moved) se->commit();
+    /* The pads play the armed track's sound: the screen that edits this
+     * track's notes must play its kit (or instrument), not the last one's. */
+    arm_track(track);
     if (sq) sq->selectScene(f.scene);
     const bool pitch = f.source == crosspad::SeqSource::Pitch;
     if (!crosspad_gui::mode_overlay_open_app(pitch ? "PitchPlay" : "Sequencer")) {
@@ -575,7 +579,7 @@ static void delete_track_go_cb(lv_event_t*)
     auto* se = engine();
     const int track = s_selTrack;
     close_overlay();
-    if (!se) return;
+    if (!se || tracks_held(se)) return;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         if (!se->song().tracks[track].inUse) return;
@@ -805,8 +809,149 @@ void input_sheet(int track)
     overlay_item(LV_SYMBOL_CLOSE " Cancel", cancel_cb, nullptr);
 }
 
+/// The track's colour: its kind's, or one of the palette's -- the header's
+/// number, its blocks and its MIX strip take it.
+static void colour_sheet()
+{
+    auto* se = engine();
+    if (!se || s_overlay || s_merging || s_bouncing >= 0) return;
+    uint8_t cur = 0;
+    crosspad::SongTrack kind;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& t = se->song().tracks[s_selTrack];
+        if (!t.inUse) return;
+        cur = t.colour;
+        kind.kind = t.kind;
+        kind.source = t.source;
+    }
+    char title[32];
+    std::snprintf(title, sizeof(title), "Track %d  -  colour", s_selTrack + 1);
+    overlay_keys(title);
+    auto pick = [](lv_event_t* e) {
+        const uint8_t c = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+        close_overlay();
+        auto* se = engine();
+        if (!se) return;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            se->song().tracks[s_selTrack].colour = c;
+        }
+        se->commit();
+        rebuild_timeline();
+    };
+    for (uint8_t c = 0; c <= crosspad::SongTrack::kTrackColours; ++c) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%s %s", c == cur ? LV_SYMBOL_OK : "", c ? kTrackPalette[c - 1].name : "As its kind");
+        kind.colour = c;
+        lv_obj_t* b = overlay_key(text, pick, (void*)(intptr_t)c);
+        lv_obj_set_style_bg_color(b, track_color(kind), 0);
+        lv_obj_set_style_text_color(b, kInk, 0);
+    }
+    overlay_key(LV_SYMBOL_CLOSE " Cancel", cancel_cb);
+}
+
 /// What a tap on a track's header opens: what acts on the track as a whole.
 /// Room for more; BOUNCE left the key row for it.
+/// The picked track again, on the lowest free track: an audio track's
+/// blocks, or a kit track's own-note blocks on a kit track of its own with
+/// the same kit -- with its levels; ARM stays where it was. A song has
+/// one Pitch track, so that one is not doubled.
+static void duplicate_track()
+{
+    auto* se = engine();
+    if (!se) return;
+    const int from = s_selTrack;
+    crosspad::SongTrack src;
+    std::string kit, title;
+    int8_t armed = -1;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const auto& song = se->song();
+        src = song.tracks[from];
+        kit = track_kit(song, from);
+        title = track_title(song, from);
+        armed = song.armed;
+    }
+    const bool audio = src.kind == crosspad::TrackKind::Audio;
+    if (!audio && src.source == crosspad::SeqSource::Pitch) {
+        note("A song has one Pitch track: bounce this one to audio to have it twice.");
+        return;
+    }
+    if (!audio && kit.empty()) { note("This track has no kit to play a copy with."); return; }
+    int made = -1;
+    if (audio) {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        made = se->song().freeTrack();
+        if (made >= 0 && !se->song().addAudioTrack(made)) made = -1;
+    } else {
+        made = make_seq_track(crosspad::SeqSource::Kit, kit);
+    }
+    if (made < 0) { note("No room: all tracks are in use, or every scene is."); return; }
+    int left = 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        auto& song = se->song();
+        auto& dst = song.tracks[made];
+        for (const auto& c : src.clips) {
+            if (!audio && !c.notes && !c.isElement()) { ++left; continue; }   // the scene's: no notes of its own
+            dst.clips.push_back(c);
+        }
+        dst.volume = src.volume;
+        dst.pan = src.pan;
+        dst.colour = src.colour;
+        if (audio) { dst.input = src.input; dst.stretch = src.stretch; }
+        /* Cut on a letter, not a byte (a Polish kit name), and " 2" kept. */
+        std::string base = title;
+        if (base.size() > 14) {
+            size_t cut = 14;
+            while (cut > 0 && ((uint8_t)base[cut] & 0xC0) == 0x80) --cut;
+            base.erase(cut);
+        }
+        dst.name = base + " 2";
+        song.armed = armed;
+    }
+    se->commit();
+    select(made, -1);
+    rebuild_timeline();
+    if (left) note_fmt("Track %d is a copy; %d block%s playing the scene stayed behind.", made + 1, left, left == 1 ? "" : "s");
+    else      note_fmt("Track %d is a copy of track %d.", made + 1, from + 1);
+}
+
+/// The picked track one place up (-1) or down (+1) the list, its blocks,
+/// sound and levels with it (AudioSong::swapTracks()).
+bool take_running(crosspad::ISongEngine* se)
+{
+    return se->seqTake() != crosspad::SyncTake::None || crosspad::arrangeAudioTake().recording();
+}
+
+/// A freeze or a take names its track by number: the tracks keep their
+/// places while one runs. Says so when they must.
+static bool tracks_held(crosspad::ISongEngine* se)
+{
+    if (se->bounceStatus().state != crosspad::BounceState::Running && !take_running(se))
+        return false;
+    note("Not now: a track is being frozen or recorded -- in a moment.");
+    return true;
+}
+
+static void move_track_order(int dir)
+{
+    auto* se = engine();
+    if (!se || tracks_held(se)) return;
+    bool moved = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        moved = se->song().swapTracks(s_selTrack, s_selTrack + dir);
+    }
+    if (!moved) return;
+    se->commit();
+    s_selTrack += dir;
+    s_selIndex = -1;
+    rebuild_timeline();
+    note_fmt("Track moved to %d.", s_selTrack + 1);
+}
+
 void track_menu()
 {
     auto* se = engine();
@@ -816,7 +961,7 @@ void track_menu()
     crosspad::StretchMode stretch = crosspad::StretchMode::Off;
     char title[32];
     std::string kit;
-    bool kitTrack = false;
+    bool kitTrack = false, canDown = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const auto& song = se->song();
@@ -829,7 +974,9 @@ void track_menu()
         armed = track_armed(song, s_selTrack);
         input = t.input;
         kitTrack = seq && t.source == crosspad::SeqSource::Kit;
+        canDown = s_selTrack + 1 < kTracks && song.tracks[s_selTrack + 1].inUse;
         if (kitTrack) kit = kit_name(track_kit(song, s_selTrack));
+        else if (seq) kit = song.instrument.empty() ? std::string() : track_title(song, s_selTrack);
         std::snprintf(title, sizeof(title), "Track %d  -  %s", s_selTrack + 1, track_badge(t));
     }
     overlay_keys(title);
@@ -837,6 +984,11 @@ void track_menu()
         char item[64];
         std::snprintf(item, sizeof(item), LV_SYMBOL_DRIVE " %s", kit.empty() ? "Kit ..." : kit.c_str());
         overlay_key(item, [](lv_event_t*) { close_overlay(); pick_kit_for(s_selTrack); });
+    } else if (seq) {
+        /* A Pitch track's instrument is picked, and played, in Pitch Play. */
+        char item[64];
+        std::snprintf(item, sizeof(item), LV_SYMBOL_AUDIO " %s", kit.empty() ? "Instrument ..." : kit.c_str());
+        overlay_key(item, [](lv_event_t*) { close_overlay(); open_seq_track(s_selTrack); });
     }
     overlay_key(armed ? LV_SYMBOL_OK " Armed" : LV_SYMBOL_PLUS " Arm for REC",
                 [](lv_event_t*) { close_overlay(); arm_track(s_selTrack); });
@@ -855,6 +1007,10 @@ void track_menu()
     overlay_key(solo ? LV_SYMBOL_OK " Solo: ON" : LV_SYMBOL_AUDIO " Solo: OFF",
                 [](lv_event_t*) { close_overlay(); toggle_solo(s_selTrack); });
     overlay_key(LV_SYMBOL_EDIT " Rename ...", [](lv_event_t*) { close_overlay(); rename_track_sheet(); });
+    overlay_key(LV_SYMBOL_IMAGE " Colour ...", [](lv_event_t*) { close_overlay(); colour_sheet(); });
+    overlay_key(LV_SYMBOL_COPY " Duplicate", [](lv_event_t*) { close_overlay(); duplicate_track(); });
+    if (s_selTrack > 0) overlay_key(LV_SYMBOL_UP " Move up", [](lv_event_t*) { close_overlay(); move_track_order(-1); });
+    if (canDown) overlay_key(LV_SYMBOL_DOWN " Move down", [](lv_event_t*) { close_overlay(); move_track_order(+1); });
     overlay_key(LV_SYMBOL_TRASH " Delete ...", [](lv_event_t*) { close_overlay(); delete_track_sheet(); });
     overlay_key(LV_SYMBOL_CLOSE " Cancel", cancel_cb);
 }

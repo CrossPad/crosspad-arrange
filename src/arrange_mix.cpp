@@ -25,13 +25,26 @@ static int32_t gain_to_fader(float g)
     return v < 1 ? 1 : (v > kFaderMax ? kFaderMax : v);
 }
 
+static lv_obj_t* s_mixFader[kTracks] = {};
+/* Each meter's peak hold: a line at the loudest of the last kPeakHoldMs,
+ * red once the track has reached full scale, until its meter is tapped. */
+constexpr uint32_t kPeakHoldMs = 1500;
+static lv_obj_t* s_mixPeak[kTracks][2] = {};
+static float     s_mixPeakV[kTracks][2] = {};
+static uint32_t  s_mixPeakAt[kTracks][2] = {};
+static bool      s_mixClip[kTracks] = {};
+
 /// The MIX window's widgets go with it.
 void mix_forget()
 {
     for (int t = 0; t < kTracks; ++t) {
+        s_mixFader[t] = nullptr;
         s_mixDb[t] = s_mixMute[t] = s_mixSolo[t] = s_mixPan[t] = s_mixPanSlider[t] = nullptr;
         s_mixMeter[t][0] = s_mixMeter[t][1] = nullptr;
         s_mixShown[t][0] = s_mixShown[t][1] = 0.0f;
+        s_mixPeak[t][0] = s_mixPeak[t][1] = nullptr;
+        s_mixPeakV[t][0] = s_mixPeakV[t][1] = 0.0f;
+        s_mixClip[t] = false;
     }
 }
 
@@ -61,21 +74,54 @@ static void mix_show()
     }
 }
 
+/// A level as the meters' 0..100: -48 dB to 0.
+static int32_t meter_value(float level)
+{
+    const float db = level > 0.0f ? 20.0f * std::log10(level) : -96.0f;
+    return db <= -48.0f ? 0 : db >= 0.0f ? 100 : (int32_t)lroundf((db + 48.0f) * 100.0f / 48.0f);
+}
+
+/// The peak line of track @p t's side @p c at its held level.
+static void show_peak(int t, int c)
+{
+    lv_obj_t* bar = s_mixMeter[t][c];
+    lv_obj_t* line = s_mixPeak[t][c];
+    if (!bar || !line) return;
+    const int32_t v = meter_value(s_mixPeakV[t][c]);
+    if (v <= 0) {
+        lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    const int32_t h = lv_obj_get_height(bar);
+    lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_y(line, std::max<int32_t>(0, (h - 2) - (h - 2) * v / 100));
+    const lv_color_t col = s_mixClip[t] ? kMute : kText;
+    if (!lv_color_eq(lv_obj_get_style_bg_color(line, LV_PART_MAIN), col)) lv_obj_set_style_bg_color(line, col, 0);
+}
+
 /// The meters beside the faders, as the ones beside the lanes: what each
 /// track plays, after its fader and pan, straight up and down at ~28 dB a
-/// second, over the lanes' -48 dB to 0 -- green, amber from -6 dB, red from -1.
+/// second, over the lanes' -48 dB to 0 -- green, amber from -6 dB, red from -1;
+/// over them the peak of the last moment, red once the track hit full scale.
 void mix_meters(crosspad::ISongEngine* se)
 {
     constexpr float kFall = 0.85f;
+    const uint32_t now = lv_tick_get();
     for (int t = 0; t < kTracks; ++t) {
         float lv[2] = {0.0f, 0.0f};
         se->trackLevels(t, lv[0], lv[1]);
         for (int c = 0; c < 2; ++c) {
             lv_obj_t* bar = s_mixMeter[t][c];
             if (!bar) continue;
+            if (lv[c] >= 0.999f) s_mixClip[t] = true;
+            if (lv[c] >= s_mixPeakV[t][c] || lv_tick_elaps(s_mixPeakAt[t][c]) > kPeakHoldMs) {
+                s_mixPeakV[t][c] = lv[c];
+                s_mixPeakAt[t][c] = now;
+            }
+            show_peak(t, c);
             s_mixShown[t][c] = std::max(lv[c], s_mixShown[t][c] * kFall);
             const float db = s_mixShown[t][c] > 0.0f ? 20.0f * std::log10(s_mixShown[t][c]) : -96.0f;
-            const int32_t v = db <= -48.0f ? 0 : db >= 0.0f ? 100 : (int32_t)lroundf((db + 48.0f) * 100.0f / 48.0f);
+            const int32_t v = meter_value(s_mixShown[t][c]);
             if (lv_bar_get_value(bar) == v) continue;
             lv_bar_set_value(bar, v, LV_ANIM_OFF);
             const lv_color_t col = db >= -1.0f ? kMute : db >= -6.0f ? kKitT : kWave;
@@ -149,6 +195,16 @@ static void mix_pan_centre_cb(lv_event_t* e)
     mix_set_pan(t, 0);
 }
 
+/// A tap on the level's reading puts the fader back at 0 dB, as the pan's
+/// reading centres the pan.
+static void mix_unity_cb(lv_event_t* e)
+{
+    const int t = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s_mixFader[t]) return;
+    lv_slider_set_value(s_mixFader[t], kFaderUnity, LV_ANIM_OFF);
+    lv_obj_send_event(s_mixFader[t], LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
 /// M and S on a header, and in its menu. The timeline repaints from the
 /// song's shape on the next tick.
 void toggle_mute(int t)
@@ -184,6 +240,17 @@ void arm_track(int t)
 {
     auto* se = engine();
     if (!se || t < 0 || t >= kTracks) return;
+    /* The take records onto the track it started on, with its kit under the
+     * fingers: ARM moves once it has ended. */
+    if (take_running(se)) {
+        bool same = false;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            same = se->song().armed == t;
+        }
+        if (!same) note("STOP the take first: it records onto the armed track.");
+        return;
+    }
     int waitsFor = -1;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -251,8 +318,7 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_set_style_text_color(chip, tr.inUse ? kInk : kDim, 0);
     lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
     if (!tr.inUse)             set_text_fmt(chip, "%d  -", t + 1);
-    else if (!tr.name.empty()) set_text_fmt(chip, "%d %s", t + 1, tr.name.c_str());
-    else                       set_text_fmt(chip, "%d %s", t + 1, track_badge(tr));
+    else                       set_text_fmt(chip, "%d %s", t + 1, tr.name.c_str());
 
     /* Pan: the reading over a short slider from the centre out. */
     s_mixPan[t] = lv_label_create(strip);
@@ -314,6 +380,7 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_set_style_outline_width(s, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_ext_click_area(s, 12);
     lv_obj_add_event_cb(s, mix_fader_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)t);
+    s_mixFader[t] = s;
 #ifdef ARR_USE_ENCODER
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, s);
 #endif
@@ -321,13 +388,36 @@ static void mix_strip(lv_obj_t* strips, int t, const crosspad::SongTrack& tr)
     lv_obj_t* gap = lv_obj_create(body);
     lv_obj_remove_style_all(gap);
     lv_obj_set_size(gap, 8, 1);
-    s_mixMeter[t][0] = mix_meter_bar(body);
-    s_mixMeter[t][1] = mix_meter_bar(body);
+    for (int c = 0; c < 2; ++c) {
+        lv_obj_t* bar = mix_meter_bar(body);
+        s_mixMeter[t][c] = bar;
+        /* A tap on the meters forgets a clip. */
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(bar, 4);
+        lv_obj_add_event_cb(bar, [](lv_event_t* e) {
+            const int tr = (int)(intptr_t)lv_event_get_user_data(e);
+            s_mixClip[tr] = false;
+            s_mixPeakV[tr][0] = s_mixPeakV[tr][1] = 0.0f;
+            show_peak(tr, 0);
+            show_peak(tr, 1);
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+        lv_obj_t* line = lv_obj_create(bar);
+        lv_obj_remove_style_all(line);
+        lv_obj_set_size(line, LV_PCT(100), 2);
+        lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(line, kText, 0);
+        lv_obj_remove_flag(line, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+        s_mixPeak[t][c] = line;
+    }
 
     s_mixDb[t] = lv_label_create(strip);
     lv_obj_set_style_text_font(s_mixDb[t], &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_mixDb[t], kText, 0);
     lv_label_set_text(s_mixDb[t], "");
+    lv_obj_add_flag(s_mixDb[t], LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_mixDb[t], 6);
+    lv_obj_add_event_cb(s_mixDb[t], mix_unity_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
 
     lv_obj_t* ms = lv_obj_create(strip);
     lv_obj_remove_style_all(ms);
@@ -369,9 +459,10 @@ void mix_cb(lv_event_t*)
             tracks[t].inUse = src.inUse;
             tracks[t].kind = src.kind;
             tracks[t].source = src.source;
-            tracks[t].name = src.name;
+            tracks[t].name = src.inUse ? track_title(se->song(), t) : src.name;   // as its header says
             tracks[t].volume = src.volume;
             tracks[t].pan = src.pan;
+            tracks[t].colour = src.colour;
         }
     }
     overlay_list("Mix");

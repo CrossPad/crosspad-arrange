@@ -221,9 +221,10 @@ void update_info()
         static int locTrack = -1, locIndex = -1;
         const auto& sel = song.tracks[s_selTrack].clips;
         const bool valid = s_selIndex >= 0 && s_selIndex < (int)sel.size();
-        if (valid && (s_selTrack != locTrack || s_selIndex != locIndex)) {
+        if (valid && !s_selQuiet && (s_selTrack != locTrack || s_selIndex != locIndex)) {
             crosspad::songTransport().setStartBar(sel[s_selIndex].bar);
         }
+        s_selQuiet = false;
         locTrack = s_selTrack;
         locIndex = valid ? s_selIndex : -1;
     }
@@ -303,10 +304,24 @@ static void seq_lane_cb(lv_event_t* e)
     }, (void*)(intptr_t)track);
 }
 
+/* Where the finger went down on a block: a release far from it was a drag
+ * with nothing to scroll (the whole song in view), not a tap on the block. */
+static lv_point_t s_blockPressAt{};
+
 static void block_cb(lv_event_t* e)
 {
     const int k = (int)(intptr_t)lv_event_get_user_data(e);
     if (k < 0 || k >= s_blockCount) return;
+    lv_indev_t* in = lv_indev_active();
+    if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+        if (in) lv_indev_get_point(in, &s_blockPressAt);
+        return;
+    }
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED && in && lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) {
+        lv_point_t p;
+        lv_indev_get_point(in, &p);
+        if (std::abs(p.x - s_blockPressAt.x) > 12 || std::abs(p.y - s_blockPressAt.y) > 12) return;
+    }
     select(s_blocks[k].track, s_blocks[k].index);
     if (s_blocks[k].obj) lv_obj_scroll_to_view(s_blocks[k].obj, LV_ANIM_ON);
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) enter_tools();
@@ -360,10 +375,96 @@ void style_toggle(lv_obj_t* b, bool on, lv_color_t col)
     set_ink(lv_obj_get_child(b, 0), on ? kInk : kDim);
 }
 
+/* The ruler held, then dragged: a loop region from the bar it was held on
+ * to the bar under the finger, drawn as it grows and set, looping, on the
+ * release. */
+static lv_obj_t* s_rulerBand = nullptr;
+static int32_t   s_rulerFrom = -1;     ///< the bar held on; -1 while no region is being drawn
+static int32_t   s_rulerTo = -1;
+
+/// The bar under the finger on the ruler, or -1.
+static int32_t ruler_bar(lv_event_t* e)
+{
+    lv_indev_t* in = lv_indev_active();
+    if (!in || s_pxPerBar <= 0) return -1;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    lv_area_t a;
+    lv_obj_get_coords((lv_obj_t*)lv_event_get_target(e), &a);
+    const int32_t x = p.x - a.x1;
+    return x < 0 ? -1 : x / s_pxPerBar;
+}
+
+/// A tap on the ruler: the playhead to that bar. Held and dragged: a loop
+/// region (rebuild_timeline()).
+static void ruler_cb(lv_event_t* e)
+{
+    auto* se = engine();
+    if (!se || !s_timeline) return;
+    const lv_event_code_t code = lv_event_get_code(e);
+    const int32_t bar = ruler_bar(e);
+    if (code == LV_EVENT_LONG_PRESSED) {
+        if (bar < 0) return;
+        s_rulerFrom = s_rulerTo = bar;
+        lv_obj_remove_flag((lv_obj_t*)lv_event_get_target(e), LV_OBJ_FLAG_SCROLL_CHAIN);   // the lanes stay put
+        s_rulerBand = lv_obj_create(s_timeline);
+        lv_obj_remove_style_all(s_rulerBand);
+        lv_obj_set_style_bg_color(s_rulerBand, kAccent, 0);
+        lv_obj_set_style_bg_opa(s_rulerBand, LV_OPA_50, 0);
+        lv_obj_remove_flag(s_rulerBand, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(s_rulerBand, bar * s_pxPerBar, 0);
+        lv_obj_set_size(s_rulerBand, s_pxPerBar, kRulerH);
+        note_fmt("Loop region: bar %d", (int)bar + 1);
+        return;
+    }
+    if (code == LV_EVENT_PRESSING) {
+        if (s_rulerFrom < 0 || bar < 0 || bar == s_rulerTo || !s_rulerBand) return;
+        s_rulerTo = bar;
+        const int32_t a = std::min(s_rulerFrom, s_rulerTo), b = std::max(s_rulerFrom, s_rulerTo) + 1;
+        lv_obj_set_pos(s_rulerBand, a * s_pxPerBar, 0);
+        lv_obj_set_width(s_rulerBand, (b - a) * s_pxPerBar);
+        note_fmt("Loop region: bars %d - %d", (int)a + 1, (int)b);
+        return;
+    }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_rulerFrom < 0) return;
+        const uint32_t a = (uint32_t)std::min(s_rulerFrom, s_rulerTo), b = (uint32_t)std::max(s_rulerFrom, s_rulerTo) + 1;
+        s_rulerFrom = s_rulerTo = -1;
+        s_rulerBand = nullptr;           // the rebuild deletes it with the lanes
+        if (code == LV_EVENT_PRESS_LOST) {
+            lv_async_call([](void*) { rebuild_timeline(); }, nullptr);   // not from inside the ruler's own event
+            return;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            auto& song = se->song();
+            song.loopStart = a;
+            song.loopEnd = b;
+            song.loop = true;
+        }
+        se->commit();
+        /* Next turn of the loop: the rebuild deletes the ruler whose event this is. */
+        lv_async_call([](void*) { rebuild_timeline(); sync_transport(); update_info(); }, nullptr);
+        note_fmt("Looping bars %u - %u.", (unsigned)a + 1, (unsigned)b);
+        return;
+    }
+    /* CLICKED: a tap -- but not the release of a region just drawn. */
+    if (bar < 0) return;
+    if (se->playing() && se->seqTake() == crosspad::SyncTake::None && !crosspad::arrangeAudioTake().recording()) {
+        se->play((uint32_t)bar);
+    } else if (!se->playing()) {
+        crosspad::songTransport().setStartBar((uint32_t)bar);
+    }
+}
+
 void rebuild_timeline()
 {
     auto* se = engine();
     if (!se || !s_timeline) return;
+    /* The lanes go, the ruler and a region being drawn on it with them. */
+    s_rulerBand = nullptr;
+    s_rulerFrom = s_rulerTo = -1;
+    drag_forget();
     std::lock_guard<std::recursive_mutex> l(se->songMutex());
     /* A seq track holds no audio -- the sequencer plays its scene, its
      * blocks have no file. So a seq track that does hold a file is a bounce
@@ -484,6 +585,11 @@ void rebuild_timeline()
         }
 
         const auto& cs = song.tracks[tr].clips;
+        /* A seq track's takes are lettered in the order they first appear:
+         * a DUP shares its notes (copy-on-write), so every copy of a part
+         * carries the part's letter and the song's form reads off the lane --
+         * A A B A. */
+        std::vector<const void*> parts;
         for (int i = 0; i < (int)cs.size() && i < perTrack && s_blockCount < kMaxBlocks; ++i) {
             const auto& c = cs[i];
             lv_obj_t* o = lv_obj_create(s_timeline);
@@ -491,8 +597,8 @@ void rebuild_timeline()
             lv_obj_set_pos(o, (int32_t)c.bar * s_pxPerBar, y);
             lv_obj_set_size(o, std::max<int32_t>(2, (int32_t)c.bars * s_pxPerBar - 1), kLaneH);
             lv_obj_set_style_radius(o, 3, 0);
-            /* Coloured by type, like the track's badge (UX 2000 section 7). */
-            lv_obj_set_style_bg_color(o, seq ? track_color(song.tracks[tr]) : kAudioT, 0);
+            /* Coloured as its track: its type's, like the badge (UX 2000 section 7), or the player's. */
+            lv_obj_set_style_bg_color(o, track_color(song.tracks[tr]), 0);
             lv_obj_set_style_bg_opa(o, song.silenced(tr) ? LV_OPA_30 : LV_OPA_COVER, 0);
             lv_obj_set_style_pad_all(o, 2, 0);
             lv_obj_set_style_pad_top(o, 1, 0);
@@ -501,6 +607,9 @@ void rebuild_timeline()
             lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)s_blockCount);
             lv_obj_add_event_cb(o, block_cb, LV_EVENT_CLICKED, (void*)(intptr_t)s_blockCount);
+            lv_obj_add_event_cb(o, block_cb, LV_EVENT_PRESSED, (void*)(intptr_t)s_blockCount);
+            for (lv_event_code_t ev : {LV_EVENT_LONG_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST})
+                lv_obj_add_event_cb(o, block_drag_cb, ev, (void*)(intptr_t)s_blockCount);
             /* An element has no waveform and no notes of its own to draw
              * here: it is a whole arrangement, baked. */
             if (!c.isElement()) {
@@ -516,7 +625,13 @@ void rebuild_timeline()
             /* A block of its own notes is the seq track's part; one that
              * plays the scene says which; an element's is styled with its Block. */
             if (!c.isElement()) {
-                if (seq && c.notes) lv_label_set_text(lb, "SEQ");
+                if (seq && c.notes) {
+                    auto it = std::find(parts.begin(), parts.end(), (const void*)c.notes.get());
+                    const size_t n = (size_t)(it - parts.begin());
+                    if (it == parts.end()) parts.push_back(c.notes.get());
+                    if (n < 26) set_text_fmt(lb, "%c", 'A' + (int)n);
+                    else        set_text_fmt(lb, "%c%u", 'A' + (int)(n % 26), (unsigned)(n / 26));
+                }
                 else if (seq)       set_text_fmt(lb, "Seq %u", (unsigned)(song.tracks[tr].scene + 1));
                 else                lv_label_set_text(lb, short_name(c.file).c_str());
             }
@@ -584,6 +699,25 @@ void rebuild_timeline()
         band(x2 - 1, 0, 2, h, s_regionEdit == RegionEdit::End ? kHead : kAccent, LV_OPA_COVER);
     }
 
+    /* The ruler takes a finger: a tap puts the playhead on that bar -- where
+     * the next PLAY starts, or, playing, where the song goes on from. A drag
+     * still scrolls the lanes (no CLICKED after a scroll). Taller than the
+     * ruler's 10 px, over the top of the lanes, so a fingertip finds it. */
+    {
+        lv_obj_t* r = lv_obj_create(s_timeline);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_pos(r, 0, 0);
+        lv_obj_set_size(r, (int32_t)bars * s_pxPerBar, kRulerH + 4);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_group_remove_obj(r);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_PRESS_LOCK);
+        for (lv_event_code_t ev : {LV_EVENT_SHORT_CLICKED, LV_EVENT_LONG_PRESSED, LV_EVENT_PRESSING,
+                                   LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST})
+            lv_obj_add_event_cb(r, ruler_cb, ev, nullptr);
+    }
+
     s_playhead = lv_obj_create(s_timeline);
     lv_obj_remove_style_all(s_playhead);
     /* Arrows (if MOVE is on) go on last, over the blocks; placed below, once
@@ -610,39 +744,60 @@ void rebuild_timeline()
         s_trackQuiet[t] = song.silenced(t);
         set_ink(s_headNum[t], track_color(tr));
         if (s_headName[t]) {
-            /* A kit track without a name of its own says its kit's: with two
-             * of them, which is which is the first thing to know. */
-            const std::string kit = tr.name.empty() ? kit_name(track_kit(song, t)) : std::string();
-            char audioName[24];
-            std::snprintf(audioName, sizeof(audioName), "AUD %s", input_name(tr.input));
-            const char* name = !tr.name.empty()                       ? tr.name.c_str()
-                             : !kit.empty()                           ? kit.c_str()
-                             : tr.kind == crosspad::TrackKind::Audio ? audioName
-                                                                      : track_badge(tr);
+            const std::string title = track_title(song, t);
+            /* Dim while it has only its kind for a name. */
+            const bool named = !tr.name.empty() || !kit_name(track_kit(song, t)).empty();
             /* Frozen, it plays its file, not its engine (auto_freeze()). */
             const auto fz = tr.kind == crosspad::TrackKind::Seq ? se->freezeState((uint8_t)t)
                                                                 : crosspad::FreezeState::None;
             const bool frozen = fz == crosspad::FreezeState::Frozen && song.armed != t;
-            /* A kit track the kits' engine is not playing, and no freeze to
-             * play instead: silent until one is made (live_kit()). */
-            const bool parked = !frozen && fz != crosspad::FreezeState::Freezing && song.seqRoute(t) == 0 &&
-                                song.liveRoute(t) < 0;
+            /* A kit track the kits' engine is not playing: its last freeze
+             * stands in (faint snowflake), and with none it is silent until
+             * one is made (live_kit()). */
+            const bool noEngine = song.seqRoute(t) == 0 && song.liveRoute(t) < 0 && song.armed != t;
+            const bool standIn = noEngine && fz == crosspad::FreezeState::Stale;
+            const bool parked = noEngine && fz == crosspad::FreezeState::None;
+            /* Played by its engine (not its freeze): whether that has its sound. */
+            const TrackSound sound = frozen || noEngine ? TrackSound::Ok : track_sound(song, t);
             /* A snowflake says frozen, and a faint one freezing: the name
              * stays readable beside it instead of losing its start to "FRZ". */
             const bool bouncing = fz == crosspad::FreezeState::Freezing && s_bouncing == t;
-            const bool ice = (frozen || fz == crosspad::FreezeState::Freezing) && !bouncing;
+            const bool ice = (frozen || standIn || fz == crosspad::FreezeState::Freezing) && !bouncing;
             if (s_headIce[t]) {
                 if (ice) lv_obj_remove_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
                 else     lv_obj_add_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
                 lv_obj_set_style_image_opa(s_headIce[t], frozen ? LV_OPA_COVER : LV_OPA_50, 0);
             }
-            lv_obj_set_x(s_headName[t], ice ? 21 : 5);
-            lv_obj_set_width(s_headName[t], ice ? kHeadW - 26 : kHeadW - 10);
-            if (bouncing) set_text(s_headName[t], "BOUNCING...");
-            else if (parked) set_text_fmt(s_headName[t], "PARKED %s", name);
-            else set_text(s_headName[t], name);
+            const bool mon = track_monitored(song, t);
+            if (s_headMon[t]) {
+                if (mon) lv_obj_remove_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
+                else     lv_obj_add_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
+            }
+            lv_obj_set_x(s_headName[t], ice || mon ? 21 : 5);
+            lv_obj_set_width(s_headName[t], ice || mon ? kHeadW - 26 : kHeadW - 10);
+            const std::string shownText = bouncing ? std::string("BOUNCING...")
+                                        : parked   ? "PARKED " + title
+                                        : sound == TrackSound::Loading ? "LOADING " + title
+                                        : sound == TrackSound::Failed  ? "! " + title
+                                                   : title;
+            set_text(s_headName[t], shownText.c_str());
+            /* A name that does not fit is set smaller, not cut: "VINTAG" and
+             * "sub_bas" were two kits nobody could tell apart. */
+            {
+                lv_point_t sz;
+                lv_text_get_size(&sz, shownText.c_str(), &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                const lv_font_t* f = sz.x > lv_obj_get_width(s_headName[t]) ? &lv_font_montserrat_10 : &lv_font_montserrat_14;
+                if (lv_obj_get_style_text_font(s_headName[t], LV_PART_MAIN) != f) {
+                    lv_obj_set_style_text_font(s_headName[t], f, 0);
+                    lv_obj_set_y(s_headName[t], f == &lv_font_montserrat_14 ? 11 : 14);
+                    /* Too long even small: it ends in dots, so it reads as cut, not as a name. */
+                    lv_label_set_long_mode(s_headName[t], f == &lv_font_montserrat_14 ? LV_LABEL_LONG_CLIP : LV_LABEL_LONG_DOT);
+                    lv_obj_set_height(s_headName[t], lv_font_get_line_height(f));   // one line, or DOT wraps it
+                }
+            }
             set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
-                                   : parked || s_trackQuiet[t] || (tr.name.empty() && kit.empty()) ? kDim : kText);
+                                   : sound == TrackSound::Failed ? kRec
+                                   : parked || sound == TrackSound::Loading || s_trackQuiet[t] || !named ? kDim : kText);
         }
         style_toggle(s_headSolo[t], tr.solo, kKitT);
         style_toggle(s_headMute[t], tr.muted, kMute);

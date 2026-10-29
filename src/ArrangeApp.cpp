@@ -104,6 +104,7 @@ void set_text_fmt(lv_obj_t* label, const char* fmt, ...)
 
 lv_color_t track_color(const crosspad::SongTrack& t)
 {
+    if (t.colour >= 1 && t.colour <= crosspad::SongTrack::kTrackColours) return kTrackPalette[t.colour - 1].color;
     if (t.kind != crosspad::TrackKind::Seq) return kAudioT;
     return t.source == crosspad::SeqSource::Pitch ? kPitchT : kKitT;
 }
@@ -134,17 +135,53 @@ std::string kit_name(const std::string& kitPath)
 {
     crosspad::IKitManager* km = crosspad::getKitManager();
     if (!km || kitPath.empty()) return {};
+    const crosspad::KitInfo* found = nullptr;
+    for (int i = 0; i < km->getKitCount() && !found; ++i) {
+        const crosspad::KitInfo* k = km->getKit(i);
+        if (k && k->path == kitPath) found = k;
+    }
+    if (!found) return {};
+    /* Two kits by one name ("BASIC" in two packs) say their folders, which
+     * the card keeps apart: two tracks both called BASIC were no help. */
     for (int i = 0; i < km->getKitCount(); ++i) {
         const crosspad::KitInfo* k = km->getKit(i);
-        if (k && k->path == kitPath) return k->name;
+        if (!k || k == found || k->name != found->name) continue;
+        std::string folder = kitPath;
+        const size_t file = folder.find_last_of('/');
+        if (file != std::string::npos) folder.erase(file);
+        const size_t slash = folder.find_last_of('/');
+        if (slash != std::string::npos) folder.erase(0, slash + 1);
+        return folder.empty() ? found->name : folder;
     }
-    return {};
+    return found->name;
 }
 
 /// The kit seq track @p t plays. Empty for any other track.
 std::string track_kit(const crosspad::AudioSong& song, int t)
 {
     return song.seqRoute(t) == 0 ? song.tracks[t].kit : std::string();
+}
+
+std::string track_title(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    if (!tr.name.empty()) return tr.name;
+    /* A kit track without a name of its own says its kit's: with two of
+     * them, which is which is the first thing to know. */
+    std::string kit = kit_name(track_kit(song, t));
+    if (!kit.empty()) return kit;
+    if (tr.kind == crosspad::TrackKind::Audio) return std::string("AUD ") + input_name(tr.input);
+    /* A Pitch track says the instrument the song names: its folder. */
+    if (tr.kind == crosspad::TrackKind::Seq && tr.source == crosspad::SeqSource::Pitch && !song.instrument.empty()) {
+        std::string p = song.instrument;
+        const size_t file = p.rfind("/instrument.json");
+        if (file != std::string::npos && file + 16 == p.size()) p.erase(file);
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        const size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) p.erase(0, slash + 1);
+        if (!p.empty()) return p;
+    }
+    return track_badge(tr);
 }
 
 lv_obj_t* s_root = nullptr;
@@ -163,6 +200,8 @@ lv_obj_t* s_heads[kTracks] = {};
 lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headIce[kTracks] = {};
+lv_obj_t* s_headMon[kTracks] = {};
+lv_obj_t* s_headProg[kTracks] = {};
 
 /* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
  * the image's recolour (kIce), so no font has to carry the glyph. */
@@ -246,10 +285,11 @@ Block     s_blocks[kMaxBlocks];
 int       s_blockCount = 0;
 static lv_timer_t* s_timer = nullptr;
 
-int      s_zoom = 1;                // index into kZoomPx; kept across visits
+int      s_zoom = 2;                // index into kZoomPx (s_pxPerBar's); kept across visits
 int32_t  s_pxPerBar = kZoomPx[2];
 int      s_selTrack = 0;
 int      s_selIndex = -1;
+bool     s_selQuiet = false;
 uint32_t s_shape = 0;
 /* Where a waveform's values fall: frames per bar at the song's tempo, frames
  * per value, and the engine's count of waveforms that have come in. */
@@ -262,6 +302,8 @@ uint32_t  s_pendingGen = 0;
 lv_obj_t* s_loading = nullptr;
 /* A project asked for and not open yet: the timeline waits for it. */
 bool      s_opening = false;
+bool      s_exportWav = false;
+uint32_t  s_exportAskedMs = 0;
 bool      s_editing = false;
 EditKind  s_editKind = EditKind::Tempo;
 /* The song window's tempo row, the MIX window's dB and M; they live and die
@@ -297,6 +339,7 @@ bool       s_regionArmed = false;
  * as much as the audio (AudioSong::copyRange()). */
 std::vector<crosspad::RangeClip> s_clipboard;
 uint32_t  s_clipboardBars = 0;
+std::string s_clipboardDir;
 
 /* A merge the platform is doing on the card, and the tracks picked for one. */
 bool      s_merging = false;
@@ -306,6 +349,27 @@ lv_obj_t* s_mergeToggles[kTracks] = {};
 crosspad::ISongEngine* engine()
 {
     return crosspad::getPlatformServices().songEngine;
+}
+
+TrackSound track_sound(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq) return TrackSound::Ok;
+    const auto& ps = crosspad::getPlatformServices();
+    if (song.liveRoute(t) == 2 && ps.instrumentHost) {
+        const auto st = ps.instrumentHost->state();
+        return st == crosspad::IInstrumentHost::State::Busy   ? TrackSound::Loading
+             : st == crosspad::IInstrumentHost::State::Failed ? TrackSound::Failed
+                                                              : TrackSound::Ok;
+    }
+    return TrackSound::Ok;
+}
+
+bool track_monitored(const crosspad::AudioSong& song, int t)
+{
+    const auto& tr = song.tracks[t];
+    const crosspad::IInputMonitor* mon = crosspad::getPlatformServices().inputMonitor;
+    return mon && tr.inUse && tr.kind == crosspad::TrackKind::Audio && mon->monitoring(tr.input);
 }
 
 /// Everything the timeline draws, folded into one word; when it changes (an
@@ -322,6 +386,10 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     mix((uint32_t)lroundf(s.bpm * 100.0f));     // where each clip's waveform falls on the bars
     /* The kit badges: a kit loaded in the kit browser is the song's too. */
     for (char c : s.kit) mix((uint8_t)c);
+    /* ARM and the live kit track: which track plays live, which is parked or
+     * on its freeze (the headers' marks); the engine moves after an ARM. */
+    mix((uint32_t)(int32_t)s.armed);
+    mix((uint32_t)(int32_t)s.liveKit);
     for (int t = 0; t < kTracks; ++t) {
         for (char c : s.tracks[t].kit) mix((uint8_t)c);
         mix(0xABCDu + t);
@@ -334,6 +402,9 @@ uint32_t song_shape(const crosspad::AudioSong& s)
         mix((uint32_t)s.tracks[t].source);
         mix(s.tracks[t].scene);
         mix(s.tracks[t].seqBlocks);
+        mix(s.tracks[t].colour);
+        mix(track_monitored(s, t));
+        mix((uint32_t)track_sound(s, t));          // LOADING / ! on its header
         for (const auto& c : s.tracks[t].clips) {
             mix(c.bar); mix(c.bars); mix(c.offset); mix(c.frames); mix(c.from);
             mix((uint32_t)(uintptr_t)c.notes.get());   // a dub, the seq view: new notes, same bars
@@ -463,6 +534,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
     place(s_followBtn, kCtxSong.follow, ARR_Y(35));
     s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
+    lv_obj_add_event_cb(s_editBtn, edit_hold_cb, LV_EVENT_LONG_PRESSED, nullptr);   // held: undo
     place(s_editBtn, 139, ARR_Y(35));
     s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
     place(s_syncBtn, 180, ARR_Y(35));
@@ -506,9 +578,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_set_style_outline_color(h, kHead, LV_STATE_FOCUS_KEY);
         lv_obj_set_style_outline_width(h, 2, LV_STATE_FOCUS_KEY);
         lv_obj_add_event_cb(h, head_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
-        /* The tracks' levels, from the tracks. The export's tool row has five
-         * keys and MIX is not one of them, so it moved to the one gesture
-         * these buttons were not using -- and the association is exact. */
+        /* Held: the track's mute, at once (head_hold_cb()). */
         lv_obj_add_event_cb(h, head_hold_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)t);
         /* One line over the name: "01" in the type's colour, S and M beside
          * it, then ARM on a seq track. They only show: a touch anywhere on the
@@ -536,6 +606,20 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(ice, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(ice, LV_OBJ_FLAG_HIDDEN);
         s_headIce[t] = ice;
+        /* A freeze or bounce of this track running: a line along the
+         * header's foot grows with it. Nothing over the lanes -- the track
+         * plays live meanwhile, and a box there took the taps meant for the
+         * blocks under it. */
+        lv_obj_t* prog = lv_obj_create(h);
+        lv_obj_remove_style_all(prog);
+        lv_obj_set_pos(prog, 2, kLaneH - 3);
+        lv_obj_set_size(prog, 0, 2);
+        lv_obj_set_style_radius(prog, 1, 0);
+        lv_obj_set_style_bg_color(prog, kIce, 0);
+        lv_obj_set_style_bg_opa(prog, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(prog, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(prog, LV_OBJ_FLAG_HIDDEN);
+        s_headProg[t] = prog;
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -572,6 +656,16 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(arm, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(arm, LV_OBJ_FLAG_CLICKABLE);
         s_headArm[t] = arm;
+        /* An audio track whose input is heard live (MONITOR): a speaker
+         * where a seq track's snowflake would be, the name after it. */
+        lv_obj_t* mon = lv_label_create(h);
+        lv_obj_set_style_text_font(mon, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(mon, kAccent, 0);
+        lv_label_set_text(mon, LV_SYMBOL_VOLUME_MAX);
+        lv_obj_set_pos(mon, 5, 15);
+        lv_obj_remove_flag(mon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(mon, LV_OBJ_FLAG_HIDDEN);
+        s_headMon[t] = mon;
         s_heads[t] = h;
         s_headNum[t] = l;
         s_headName[t] = name;
@@ -687,7 +781,7 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
     /* ── tools on the selected block ──────────────────────────────────────
      * The export's five keys at 58 px on a 62 px pitch, filling the width.
      * Z- and Z+ became ZOOM in the context row and MIX a key there beside the
-     * song (and a long press on a track button); everything else is where it
+     * song; everything else is where it
      * was. MOVE stays an editable
      * button -- the encoder nudges the block with it, which no plain key
      * could do. */
@@ -771,6 +865,8 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
             {
                 auto* se = engine();
                 crosspad::transportClaim(&crosspad::songTransport(), !(se && se->playing()));
+                /* The pads sound as MIX shows the armed track, stopped too. */
+                if (se) se->setSongScreen(true);
             }
             s_visible = true;
             sound_keeper_cb(nullptr);   // the instrument starts loading now, not in 100 ms
@@ -816,6 +912,7 @@ void Arrange_destroy(lv_obj_t* root)
     /* The pads go back before the next screen takes them; the instrument stays
      * while the song plays it (sound_keeper_cb). */
     s_visible = false;
+    if (auto* se = engine()) se->setSongScreen(false);
     if (s_soundPads && crosspad::getPadManager().getActivePadLogic() == kSoundLogic) {
         crosspad::getPadManager().popPadLogic();
     }
@@ -855,6 +952,9 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headNum) l = nullptr;
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
+    for (auto& m : s_headMon) m = nullptr;
+    for (auto& p : s_headProg) p = nullptr;
+    drag_forget();
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
     for (auto& w : s_meterWell) w = nullptr;

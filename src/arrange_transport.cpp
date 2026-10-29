@@ -75,14 +75,33 @@ static void show_meters(crosspad::ISongEngine* se)
     }
 }
 
-static bool s_procFreeze = false;   ///< the box says a freeze, not a time stretch
 static bool s_procElement = false;  ///< the box says an element's enter, leave or bake
+static int  s_progTrack = -1;       ///< the header whose foot shows a freeze's progress
 
-/// A track freezing, or stretched or repitched blocks still being fitted to
-/// the tempo: a box over the lanes for as long as either runs -- both are
-/// made only while stopped, and until then those blocks play as they were.
+/// A freeze or bounce of ours: a line along its track header's foot.
+static void show_freeze(crosspad::ISongEngine* se)
+{
+    int track = -1;
+    unsigned pct = 0;
+    if (!freeze_progress(se, track, pct)) track = -1;
+    if (s_progTrack >= 0 && s_progTrack != track && s_headProg[s_progTrack]) {
+        lv_obj_add_flag(s_headProg[s_progTrack], LV_OBJ_FLAG_HIDDEN);
+    }
+    s_progTrack = track;
+    if (track < 0 || !s_headProg[track]) return;
+    lv_obj_t* p = s_headProg[track];
+    const int32_t w = std::max<int32_t>(2, (int32_t)((kHeadW - 4) * pct / 100));
+    if (lv_obj_get_width(p) != w) lv_obj_set_width(p, w);
+    if (lv_obj_has_flag(p, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN);
+}
+
+/// Stretched or repitched blocks still being fitted to the tempo, or an
+/// element entered, left or baked: a box over the lanes for as long as either
+/// runs -- a stretch is made only while stopped, and until then those blocks
+/// play as they were. A freeze says so on its track's header (show_freeze()).
 static void show_processing(crosspad::ISongEngine* se)
 {
+    show_freeze(se);
     if (!s_procBox) return;
     const bool up = !lv_obj_has_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
     char fbuf[72];
@@ -97,22 +116,6 @@ static void show_processing(crosspad::ISongEngine* se)
     }
     if (s_procElement) {
         s_procElement = false;
-        if (up && !se->stretchWaiting()) {
-            lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
-            return;
-        }
-    }
-    if (freeze_progress(se, fbuf, sizeof(fbuf))) {
-        s_procFreeze = true;
-        set_text(s_procLabel, fbuf);
-        if (!up) {
-            lv_obj_remove_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(s_procBox);
-        }
-        return;
-    }
-    if (s_procFreeze) {
-        s_procFreeze = false;
         if (up && !se->stretchWaiting()) {
             lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
             return;
@@ -181,6 +184,12 @@ void tick_cb(lv_timer_t*)
             note_fmt("No take: %s.", landed.error.c_str());
         }
     }
+    /* A REC that could not start, wherever it was pressed. */
+    static uint32_t refused = crosspad::arrangeAudioTake().refusals();
+    if (crosspad::arrangeAudioTake().refusals() != refused) {
+        refused = crosspad::arrangeAudioTake().refusals();
+        note_fmt("No REC: %s.", crosspad::arrangeAudioTake().lastError().c_str());
+    }
     if (s_merging) {
         char buf[48];
         if (se->editState() == crosspad::SongOpState::Busy) {
@@ -194,13 +203,16 @@ void tick_cb(lv_timer_t*)
             if (!ok) note( "Not merged: no card, nothing audible on those tracks, or the card is full.");
         }
     }
+    if (s_editing && s_editKind == EditKind::ExportWav && se->editState() == crosspad::SongOpState::Busy) {
+        note_fmt("Writing the mix ... %u%%", (unsigned)se->editProgress());
+    }
     if (s_editing && se->editState() != crosspad::SongOpState::Busy) {
         s_editing = false;
         const bool failed = se->editState() == crosspad::SongOpState::Failed;
         show_tempo();                 // the tempo row, if its window is still open
         rebuild_timeline();
         update_info();
-        if (s_editKind == EditKind::Export) export_done(!failed);
+        if (s_editKind == EditKind::Export || s_editKind == EditKind::ExportWav) export_done(!failed);
         else if (s_editKind == EditKind::ElementDelete) element_delete_done(!failed);
         else if (failed && s_editKind == EditKind::Rename) rename_failed();
         else if (failed && s_editKind == EditKind::Delete) {
@@ -212,7 +224,7 @@ void tick_cb(lv_timer_t*)
     if (s_bouncing >= 0) {
         const crosspad::BounceStatus st = se->bounceStatus();
         if (st.state == crosspad::BounceState::Running) {
-            /* How far: the processing box (freeze_progress()). */
+            /* How far: its header's foot (show_freeze()). */
         } else {
             const int track = s_bouncing;
             s_bouncing = -1;

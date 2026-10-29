@@ -146,7 +146,16 @@ inline const lv_color_t kAudioT = lv_color_hex(0x4EA6D3);    // AUD   -- the Rec
 
 inline const lv_color_t kKitT   = lv_color_hex(0xFFC857);    // KIT   -- the Sampler's amber
 
-inline const lv_color_t kPitchT = lv_color_hex(0xA77BF0);    // PITCH -- Pitch Play's purple
+inline const lv_color_t kPitchT = lv_color_hex(0xA77BF0);
+/// The colours a player can give a track (SongTrack::colour 1..8): bright
+/// enough for ink on them, apart from each other and from REC's red.
+struct TrackSwatch { const char* name; lv_color_t color; };
+inline const TrackSwatch kTrackPalette[crosspad::SongTrack::kTrackColours] = {
+    {"Coral",  lv_color_hex(0xFF8A65)}, {"Orange", lv_color_hex(0xFFA726)},
+    {"Lime",   lv_color_hex(0xC0E05A)}, {"Green",  lv_color_hex(0x5CCB82)},
+    {"Teal",   lv_color_hex(0x40C4B8)}, {"Sky",    lv_color_hex(0x6FB8FF)},
+    {"Violet", lv_color_hex(0xB08CFF)}, {"Pink",   lv_color_hex(0xF48FC8)},
+};    // PITCH -- Pitch Play's purple
 
 /// The inputs an audio track can record, in the order its input sheet lists
 /// them, and what the header and the sheet call each.
@@ -204,7 +213,7 @@ inline constexpr int32_t kWaveBarPitch = 3;
 enum class Pending : uint8_t { None, Projects, Clips, Elements, Songs };
 
 /* A rename, tempo change, delete or export the platform is doing on the card. */
-enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ElementDelete };
+enum class EditKind : uint8_t { Tempo, Rename, Delete, Export, ExportWav, ElementDelete };
 
 /* MOVE's axis while it is turned: first click along the bars, second across
  * the tracks, third done. Arrows beside the block show which, and a finger
@@ -229,7 +238,9 @@ extern bool      s_follow;
 extern lv_obj_t* s_heads[kTracks];
 extern lv_obj_t* s_headNum[kTracks];
 extern lv_obj_t* s_headName[kTracks];
+extern lv_obj_t* s_headMon[kTracks];   ///< an audio track's input monitored: a speaker before its name
 extern lv_obj_t* s_headIce[kTracks];   ///< a frozen track's snowflake, before its name
+extern lv_obj_t* s_headProg[kTracks];  ///< a freeze or bounce running: how far, along the header's foot
 extern lv_obj_t* s_headMute[kTracks];
 extern lv_obj_t* s_headSolo[kTracks];
 extern lv_obj_t* s_headArm[kTracks];
@@ -269,6 +280,7 @@ extern int      s_zoom;
 extern int32_t  s_pxPerBar;
 extern int      s_selTrack;
 extern int      s_selIndex;
+extern bool     s_selQuiet;   ///< the next selection does not locate the song (a header picked)
 extern uint32_t s_shape;
 extern uint32_t s_framesPerBar;
 extern uint32_t s_peakHop;
@@ -278,6 +290,9 @@ extern uint32_t  s_pendingGen;
 extern lv_obj_t* s_loading;
 extern bool      s_opening;
 extern bool      s_editing;
+/// A mixdown asked for: its seq tracks are frozen first (auto_freeze()), then it is written.
+extern bool      s_exportWav;
+extern uint32_t  s_exportAskedMs;   ///< lv_tick_get() when the mixdown was asked for
 extern EditKind  s_editKind;
 extern lv_obj_t* s_tempoItem;
 extern lv_obj_t* s_songList;
@@ -302,6 +317,7 @@ extern lv_obj_t*  s_regionHandle;
 extern bool       s_regionArmed;
 extern std::vector<crosspad::RangeClip> s_clipboard;
 extern uint32_t  s_clipboardBars;
+extern std::string s_clipboardDir;   ///< the song the bars were copied in
 extern bool      s_merging;
 extern uint32_t  s_mergeMask;
 extern lv_obj_t* s_mergeToggles[kTracks];
@@ -316,6 +332,15 @@ const char* input_name(crosspad::RecInput in);
 bool track_armed(const crosspad::AudioSong& song, int t);
 std::string kit_name(const std::string& kitPath);
 std::string track_kit(const crosspad::AudioSong& song, int t);
+/// A seq track's sound in its engine: what its header says of a kit or an
+/// instrument still loading, or one that would not load.
+enum class TrackSound : uint8_t { Ok, Loading, Failed };
+TrackSound track_sound(const crosspad::AudioSong& song, int t);
+/// An audio track whose input MONITOR has on the speakers and jacks.
+bool track_monitored(const crosspad::AudioSong& song, int t);
+/// What a track is called on its header and its MIX strip: its name, else its
+/// kit's, else "AUD <input>" or its kind.
+std::string track_title(const crosspad::AudioSong& song, int t);
 crosspad::ISongEngine* engine();
 uint32_t song_shape(const crosspad::AudioSong& s);
 std::string short_name(const std::string& file);
@@ -335,6 +360,10 @@ void paint_tools();
 void enter_tools();
 int move_target(const crosspad::AudioSong& song, int from, int dir);
 void move_cb(lv_event_t* e);
+/// A block held and dragged to another bar or lane (registered on every block).
+void block_drag_cb(lv_event_t* e);
+/// A drag in hand is let go: the timeline it was on is being rebuilt or closed.
+void drag_forget();
 void dup_cb(lv_event_t*);
 void del_cb(lv_event_t*);
 bool back_handler(lv_obj_t*);
@@ -362,6 +391,7 @@ void length_cb(lv_event_t*);
 void region_cb(lv_event_t* e);
 uint32_t playhead_bar();
 void edit_cb(lv_event_t*);
+void edit_hold_cb(lv_event_t*);
 void seq_track_made(int made);
 void bounce_sheet();
 void delete_track_sheet();
@@ -376,11 +406,14 @@ void size_lanes(int rows);
 void toggle_mute(int t);
 void toggle_solo(int t);
 void arm_track(int t);
+/// A REC or DUB runs (a seq take or an audio take).
+bool take_running(crosspad::ISongEngine* se);
 void mix_forget();
 void mix_meters(crosspad::ISongEngine* se);
 void style_toggle(lv_obj_t* b, bool on, lv_color_t col);
 void mix_cb(lv_event_t*);
-bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
+/// The track a freeze or bounce of ours is rendering and how far it is (0..100).
+bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct);
 void sound_keeper_cb(lv_timer_t*);
 void sound_keeper_start();
 void request_list(Pending what, const char* title);
