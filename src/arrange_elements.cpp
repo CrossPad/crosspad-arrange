@@ -208,7 +208,7 @@ void make_crumb(lv_obj_t* row, int32_t w, const std::string& text, int level, bo
 
 void layout_context_row(bool inside)
 {
-    for (lv_obj_t* o : {s_projBtn, s_mixBtn, s_syncBtn, s_editBtn}) {
+    for (lv_obj_t* o : {s_projBtn, s_mixBtn, s_syncBtn, s_quantBtn, s_editBtn}) {
         if (!o) continue;
         if (inside) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
@@ -861,15 +861,19 @@ static void watch_bakes(crosspad::ISongEngine* se)
 /// played for kIdleBakeMs (core's, the one its own docs name) -- so the engine
 /// may bake the other songs' blocks of an element changed since. The press
 /// time comes off the bus: PadManager keeps none.
+static void watch_pads()
+{
+    if (s_padSub) return;
+    s_lastPadUs.store(crosspad::getClock().getTimeUs());
+    s_padSub = crosspad::getEventBus().subscribe(crosspad::EventType::PadPressed,
+        [](const void*, crosspad::EventType, void*) {
+            s_lastPadUs.store(crosspad::getClock().getTimeUs());
+        });
+}
+
 static void idle_tick(crosspad::ISongEngine* se)
 {
-    if (!s_padSub) {
-        s_lastPadUs.store(crosspad::getClock().getTimeUs());
-        s_padSub = crosspad::getEventBus().subscribe(crosspad::EventType::PadPressed,
-            [](const void*, crosspad::EventType, void*) {
-                s_lastPadUs.store(crosspad::getClock().getTimeUs());
-            });
-    }
+    watch_pads();
     const int64_t quietUs = crosspad::getClock().getTimeUs() - s_lastPadUs.load();
     const bool away = !se->playing() && !crosspad::elementNav().busy()
                       && quietUs >= (int64_t)crosspad::kIdleBakeMs * kUsPerMs;
@@ -877,6 +881,14 @@ static void idle_tick(crosspad::ISongEngine* se)
         s_idleSent = away;
         se->idleBaking(away);
     }
+}
+
+bool player_away()
+{
+    watch_pads();
+    const int64_t quietUs = crosspad::getClock().getTimeUs() - s_lastPadUs.load();
+    return quietUs >= (int64_t)crosspad::kIdleBakeMs * kUsPerMs &&
+           lv_display_get_inactive_time(nullptr) >= crosspad::kIdleBakeMs;
 }
 
 /// The first element block only the engine can bake (see kAutoRebakeMs), as a

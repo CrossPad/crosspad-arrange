@@ -83,8 +83,10 @@ static bool engine_holds(const crosspad::AudioSong& song, int t)
  * holder with nothing to freeze, or whose kit is not in the engine, or whose
  * freeze failed and is not due again. With the armed track live and another
  * kit track still to freeze (a tempo turned, a song from before), the engine
- * goes to that one while @p canFreeze, it is frozen, and the engine comes
- * back. @p st is freezeState() of each track, @p skip the tracks whose last
+ * goes to that one while @p canFreeze and the player is away (player_away()),
+ * it is frozen, and the engine comes back: under a player's fingers the
+ * engine stays the armed track's, or a freeze giving way to the pads swung
+ * it back and forth, loading one kit after the other under them. @p st is freezeState() of each track, @p skip the tracks whose last
  * freeze failed and is not due again. */
 static void live_kit(crosspad::ISongEngine* se, const crosspad::FreezeState* st, uint32_t skip, bool canFreeze)
 {
@@ -104,7 +106,7 @@ static void live_kit(crosspad::ISongEngine* se, const crosspad::FreezeState* st,
         if (want >= 0 && want != holder) {
             if (holderWaits) return;
             next = want;
-        } else if (canFreeze && !holderWaits) {
+        } else if (canFreeze && !holderWaits && player_away()) {
             for (int t = 0; t < kTracks && next < 0; ++t)
                 if (t != holder && t != want && toFreeze(t)) next = t;
         }
@@ -221,20 +223,22 @@ static void auto_freeze(crosspad::ISongEngine* se)
     }
 }
 
-/// A freeze Arrange started, while it runs: the track and how far the whole
-/// is -- the renders through of those its plan needs (core finds the ones it
-/// has on the card and renders only the rest). False when no freeze of ours
-/// runs.
-bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct)
+/// The processing box's text for a freeze Arrange started, while it runs:
+/// the track, the renders through of those its plan needs (core finds the
+/// ones it has on the card and renders only the rest) and how far the whole
+/// is. False when no freeze of ours runs.
+bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap)
 {
     /* A bounce from BOUNCE is a freeze whose renders become the track's
-     * audio (core 2.14): the same count. */
-    track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
+     * audio (core 2.14): the same box, the same count. */
+    const int track = s_bouncing >= 0 ? s_bouncing : s_freezeRunning;
     if (!se || track < 0 || se->freezeState((uint8_t)track) != crosspad::FreezeState::Freezing) return false;
     const crosspad::BounceStatus st = se->bounceStatus();
     const uint32_t pieces = st.pieces ? st.pieces : 1;
     const uint64_t part = st.framesTotal ? (uint64_t)st.framesDone * 100 / st.framesTotal : 0;
-    pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
+    const unsigned pct = (unsigned)std::min<uint64_t>(100, (st.piecesDone * 100 + part) / pieces);
+    std::snprintf(buf, cap, "%s TRACK %d\nrender %u of %u  -  %u%%", s_bouncing >= 0 ? "BOUNCING" : "FREEZING",
+                  track + 1, (unsigned)std::min<uint32_t>(st.piecesDone + 1, pieces), (unsigned)pieces, pct);
     return true;
 }
 

@@ -191,6 +191,7 @@ lv_obj_t* s_projLabel = nullptr;
 lv_obj_t* s_mixBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
+lv_obj_t* s_quantBtn = nullptr;  ///< Q: the grid a take is snapped to, beside SYNC
 lv_obj_t* s_editBtn = nullptr;   ///< the timeline's EDIT, beside SYNC
 lv_obj_t* s_followBtn = nullptr; ///< FOLLOW: the timeline keeps the playhead in view while playing
 /* Kept across openings of the screen, as the player left it: on, the lanes
@@ -201,7 +202,6 @@ lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headIce[kTracks] = {};
 lv_obj_t* s_headMon[kTracks] = {};
-lv_obj_t* s_headProg[kTracks] = {};
 
 /* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
  * the image's recolour (kIce), so no font has to carry the glyph. */
@@ -513,34 +513,38 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * No back button and no PLAY: back is the power button's click, and the
      * transport is the bar above. ZOOM takes the place the two zoom keys had
      * on the tool row, which is where the export puts it. */
-    s_projBtn = make_button(s_root, 58, "", project_cb);
+    s_projBtn = make_button(s_root, 52, "", project_cb);
     place(s_projBtn, 6, ARR_Y(35));
     s_projLabel = lv_obj_get_child(s_projBtn, 0);
     lv_label_set_long_mode(s_projLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_projLabel, 52);
+    lv_obj_set_width(s_projLabel, 46);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
     /* MIX beside the song, where the export's dim "18 bars" was: the
      * tracks' desk one press away (it was only a long press on a track's
      * button), and the position is the top bar's anyway. */
-    s_mixBtn = make_button(s_root, 42, "MIX", mix_cb);
-    place(s_mixBtn, 67, ARR_Y(35));
+    s_mixBtn = make_button(s_root, 36, "MIX", mix_cb);
+    place(s_mixBtn, 62, ARR_Y(35));
 
     /* EDIT here is the timeline's: the loop region, copy / paste, merging,
      * the song's length, a clip from the library (edit_cb). The key at the
      * foot is the clip's (clip_edit_cb). */
     /* FOLLOW, an arrow beside the position it follows; the keys after it a
      * little narrower than the export's, to make the room. */
-    s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
+    s_followBtn = make_button(s_root, 22, LV_SYMBOL_RIGHT, follow_cb);
     place(s_followBtn, kCtxSong.follow, ARR_Y(35));
-    s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
+    s_editBtn = make_button(s_root, 34, "EDIT", edit_cb);
     lv_obj_add_event_cb(s_editBtn, edit_hold_cb, LV_EVENT_LONG_PRESSED, nullptr);   // held: undo
-    place(s_editBtn, 139, ARR_Y(35));
-    s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
-    place(s_syncBtn, 180, ARR_Y(35));
-    s_loopBtn = make_button(s_root, 42, "LOOP", loop_cb);
+    place(s_editBtn, 128, ARR_Y(35));
+    s_syncBtn = make_button(s_root, 34, "SYNC", sync_cb);
+    place(s_syncBtn, 166, ARR_Y(35));
+    /* Q: what a REC or DUB here snaps to, the Sequencer's own setting --
+     * on this screen too, so a take is not a trip to the seq view first. */
+    s_quantBtn = make_button(s_root, 34, "1/16", quant_cb);
+    place(s_quantBtn, 204, ARR_Y(35));
+    s_loopBtn = make_button(s_root, 34, "LOOP", loop_cb);
     place(s_loopBtn, kCtxSong.loop, ARR_Y(35));
-    s_zoomBtn = make_button(s_root, 42, "ZOOM", zoom_cycle_cb);
+    s_zoomBtn = make_button(s_root, 34, "ZOOM", zoom_cycle_cb);
     place(s_zoomBtn, kCtxSong.zoom, ARR_Y(35));
     elements_build_crumbs(s_root);
 
@@ -606,20 +610,6 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(ice, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(ice, LV_OBJ_FLAG_HIDDEN);
         s_headIce[t] = ice;
-        /* A freeze or bounce of this track running: a line along the
-         * header's foot grows with it. Nothing over the lanes -- the track
-         * plays live meanwhile, and a box there took the taps meant for the
-         * blocks under it. */
-        lv_obj_t* prog = lv_obj_create(h);
-        lv_obj_remove_style_all(prog);
-        lv_obj_set_pos(prog, 2, kLaneH - 3);
-        lv_obj_set_size(prog, 0, 2);
-        lv_obj_set_style_radius(prog, 1, 0);
-        lv_obj_set_style_bg_color(prog, kIce, 0);
-        lv_obj_set_style_bg_opa(prog, LV_OPA_COVER, 0);
-        lv_obj_remove_flag(prog, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(prog, LV_OBJ_FLAG_HIDDEN);
-        s_headProg[t] = prog;
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -953,7 +943,6 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
     for (auto& m : s_headMon) m = nullptr;
-    for (auto& p : s_headProg) p = nullptr;
     drag_forget();
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
@@ -965,7 +954,7 @@ void Arrange_destroy(lv_obj_t* root)
     /* the status line went with the screen */
     s_root = s_timeline = s_playhead = s_projLabel = s_mixBtn = nullptr;
     s_headCol = s_meterCol = nullptr;
-    s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
+    s_zoomBtn = s_loopBtn = s_syncBtn = s_quantBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_prevEncGroup) lv_indev_restore_group(indev_encoderTop, s_prevEncGroup);
