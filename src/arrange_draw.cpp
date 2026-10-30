@@ -755,14 +755,18 @@ void rebuild_timeline()
              * stands in (faint snowflake), and with none it is silent until
              * one is made (live_kit()). */
             const bool noEngine = song.seqRoute(t) == 0 && song.liveRoute(t) < 0 && song.armed != t;
-            const bool standIn = noEngine && fz == crosspad::FreezeState::Stale;
             const bool parked = noEngine && fz == crosspad::FreezeState::None;
+            /* A track ARM is not on that has a freeze: the kits' engine only
+             * visits it to freeze it again (live_kit()), so it reads as
+             * frozen-to-be throughout -- not as a kit LOADING, nor with its
+             * snowflake gone for the visit and back after it. */
+            const bool onIce = song.armed != t && fz != crosspad::FreezeState::None;
             /* Played by its engine (not its freeze): whether that has its sound. */
-            const TrackSound sound = frozen || noEngine ? TrackSound::Ok : track_sound(song, t);
+            const TrackSound sound = onIce || noEngine ? TrackSound::Ok : track_sound(song, t);
             /* A snowflake says frozen, and a faint one freezing: the name
              * stays readable beside it instead of losing its start to "FRZ". */
             const bool bouncing = fz == crosspad::FreezeState::Freezing && s_bouncing == t;
-            const bool ice = (frozen || standIn || fz == crosspad::FreezeState::Freezing) && !bouncing;
+            const bool ice = (onIce || fz == crosspad::FreezeState::Freezing) && !bouncing;
             if (s_headIce[t]) {
                 if (ice) lv_obj_remove_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
                 else     lv_obj_add_flag(s_headIce[t], LV_OBJ_FLAG_HIDDEN);
@@ -773,8 +777,12 @@ void rebuild_timeline()
                 if (mon) lv_obj_remove_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
                 else     lv_obj_add_flag(s_headMon[t], LV_OBJ_FLAG_HIDDEN);
             }
-            lv_obj_set_x(s_headName[t], ice || mon ? 21 : 5);
-            lv_obj_set_width(s_headName[t], ice || mon ? kHeadW - 26 : kHeadW - 10);
+            /* A seq track keeps the snowflake's room whether it shows or not:
+             * the name moved and narrowed with it, changed its font at the
+             * edge and showed more of itself, then less, at every freeze. */
+            const bool slot = tr.kind == crosspad::TrackKind::Seq || mon;
+            lv_obj_set_x(s_headName[t], slot ? 21 : 5);
+            lv_obj_set_width(s_headName[t], slot ? kHeadW - 26 : kHeadW - 10);
             const std::string shownText = bouncing ? std::string("BOUNCING...")
                                         : parked   ? "PARKED " + title
                                         : sound == TrackSound::Loading ? "LOADING " + title
@@ -795,7 +803,7 @@ void rebuild_timeline()
                     lv_obj_set_height(s_headName[t], lv_font_get_line_height(f));   // one line, or DOT wraps it
                 }
             }
-            set_ink(s_headName[t], fz == crosspad::FreezeState::Freezing || frozen ? kIce
+            set_ink(s_headName[t], ice || bouncing ? kIce
                                    : sound == TrackSound::Failed ? kRec
                                    : parked || sound == TrackSound::Loading || s_trackQuiet[t] || !named ? kDim : kText);
         }

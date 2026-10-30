@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.42.0",
+  "version": "0.42.1",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.42.1: A kit track ARM is not on now freezes while another kit track is armed: the kits' engine went to it and was taken back by the armed track the next moment, before its kit came in, so in a full arrangement the freeze never started and the header blinked. The engine now stays on the track it went to freeze until its kit is in, as long as the player leaves the board alone (a kit that does not come in 30 s is tried again later). A frozen track's header keeps its snowflake and its name in one place and one font while the engine visits it, instead of showing LOADING and a longer, then shorter name.",
     "0.42.0: Q on the context row, between SYNC and LOOP: the grid a REC or DUB snaps to (1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32, free), the Sequencer's own setting, so a take is not a trip to the seq view first; the row's keys are a few pixels narrower for it. Each kit track plays and records with its own swing (core 2.43). A freeze or bounce shows in the box over the lanes again (FREEZING TRACK n, render x of y), not as a line on its header. The kits' engine leaves the armed track to freeze another kit track only once the player has let the board be for 5 s: under the fingers a freeze giving way to the pads swung it back and forth, loading one kit after the other and trying the freeze again and again. Requires core 2.43.",
     "0.41.0: main's 0.29-0.40 (drag blocks, Export mix, Record this block again, loop region by finger, insert and delete bars, hold a header to mute, move and duplicate tracks, track colours, MIX peak hold, LOADING on a live header) on one kits' engine: no kit slots and no harvest. A kit track the engine does not play has its stale freeze stand in under its blocks; a mixdown hands the engine to each kit track still to freeze in turn. Requires core 2.42.",
     "0.28.0: one kits' engine for every kit track (core 2.33) -- no Kit 2. Each kit track keeps its own kit; the armed one plays live, its kit the pads' and the Sampler's, the rest their freeze. ARM on another kit track, or a new one, hands the engine over only once the track it leaves is frozen: a new kit track stops the song, the old track freezes, then the new kit loads (an ARM while playing waits for the stop); CLIP EDIT arms the track and hands it over at once, so EDIT there edits that track's kit. A kit track still to be frozen gets the engine in turn while the song is stopped. A track's kit picked again is the song's too while it is live. Requires core 2.33.",

@@ -54,6 +54,11 @@ constexpr uint32_t kExportWaitMs = 20000;
 static int         s_freezeRunning = -1;   ///< the track a freeze asked for here is making
 static crosspad::RetryBackoff s_freezeRetry[kTracks];   ///< after a failed freeze, on lv_tick
 static uint64_t    s_freezeShown = UINT64_MAX;   ///< freezeState() of each track, two bits, as last drawn
+/// How long the kits' engine waits on a track it went to freeze for that
+/// track's kit to come in (live_kit()).
+constexpr uint32_t kVisitLoadMs = 30000;
+static int         s_visit = -1;          ///< the kit track the engine went to, to freeze it
+static uint32_t    s_visitSince = 0;      ///< when, on lv_tick
 
 /// The engine track @p t plays through holds its sound, loaded: what a freeze
 /// renders is the track's. The kits' engine, the track's kit; Pitch, the
@@ -86,9 +91,15 @@ static bool engine_holds(const crosspad::AudioSong& song, int t)
  * goes to that one while @p canFreeze and the player is away (player_away()),
  * it is frozen, and the engine comes back: under a player's fingers the
  * engine stays the armed track's, or a freeze giving way to the pads swung
- * it back and forth, loading one kit after the other under them. @p st is freezeState() of each track, @p skip the tracks whose last
- * freeze failed and is not due again. */
-static void live_kit(crosspad::ISongEngine* se, const crosspad::FreezeState* st, uint32_t skip, bool canFreeze)
+ * it back and forth, loading one kit after the other under them. A track the
+ * engine went to keeps it while its kit comes in, as long as the player stays
+ * away: taken back at once, the engine went to it and back every tick with
+ * a kit track armed, its kit never came and it never froze (30.10.2026). A kit
+ * that has not come in kVisitLoadMs is tried again later. @p st is
+ * freezeState() of each track, @p skip the tracks whose last freeze failed
+ * and is not due again. */
+static void live_kit(crosspad::ISongEngine* se, const crosspad::FreezeState* st, uint32_t skip, bool canFreeze,
+                     uint32_t now)
 {
     int holder = -1, next = -1;
     {
@@ -102,15 +113,26 @@ static void live_kit(crosspad::ISongEngine* se, const crosspad::FreezeState* st,
         };
         holder = song.seqRoute(song.liveKit) == 0 ? song.liveKit : -1;
         const int want = song.seqRoute(song.armed) == 0 ? song.armed : -1;
-        const bool holderWaits = holder >= 0 && holder != want && toFreeze(holder) && engine_holds(song, holder);
+        const bool away = canFreeze && player_away();
+        bool holderWaits = false;
+        if (holder >= 0 && holder != want && toFreeze(holder)) {
+            if (engine_holds(song, holder)) {
+                holderWaits = true;
+            } else if (away && holder == s_visit) {
+                if (now - s_visitSince < kVisitLoadMs) holderWaits = true;
+                else                                   s_freezeRetry[holder].failed(now);
+            }
+        }
         if (want >= 0 && want != holder) {
             if (holderWaits) return;
             next = want;
-        } else if (canFreeze && !holderWaits && player_away()) {
+        } else if (away && !holderWaits) {
             for (int t = 0; t < kTracks && next < 0; ++t)
                 if (t != holder && t != want && toFreeze(t)) next = t;
         }
         if (next < 0 || next == holder) return;
+        s_visit = next == want ? -1 : next;
+        s_visitSince = now;
     }
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
@@ -133,6 +155,7 @@ static void auto_freeze(crosspad::ISongEngine* se)
     if (dir != s_freezeSong) {
         s_freezeSong = dir;
         s_freezeRunning = -1;
+        s_visit = -1;
         if (s_exportWav) {
             s_exportWav = false;          // asked of the song that was open, not of this one
             note("No mix: another song was opened.");
@@ -156,7 +179,7 @@ static void auto_freeze(crosspad::ISongEngine* se)
         if (!s_freezeRetry[t].due(now)) skip |= 1u << t;
     /* Never under a render: the kit it renders through would change. */
     const bool canFreeze = s_visible && !bouncing && !se->playing() && s_freezeRunning < 0;
-    if (!bouncing && s_freezeRunning < 0) live_kit(se, st, skip, canFreeze);
+    if (!bouncing && s_freezeRunning < 0) live_kit(se, st, skip, canFreeze, now);
     /* A mixdown asked for: every seq track that is heard frozen -- the armed
      * one too, which auto-freeze leaves live -- then the mix is written. */
     if (s_exportWav && !bouncing && !se->playing() && s_freezeRunning < 0 &&
