@@ -21,7 +21,7 @@
  * onto the armed seq track from there -- ARM, the dot on a track's header,
  * which on a seq track is also whose kit the pads play here; on an audio
  * track REC records its input instead, and there is no DUB (ISongEngine::recordSeq,
- * AudioSong::armed; SecondKitPadLogic for the second kit): a REC becomes a
+ * AudioSong::armed, whose kit the kits' engine plays, AudioSong::liveKit): a REC becomes a
  * block of its own notes as many bars long as it ran -- a STOP puts the
  * playhead back on bar one, the next PLAY's downbeat -- and a DUB adds
  * to the blocks it plays over; with LOOP over a region the take goes round
@@ -156,13 +156,10 @@ std::string kit_name(const std::string& kitPath)
     return found->name;
 }
 
-/// The kit seq track @p t plays: its own on the second kit's route, else the
-/// song's. Empty for any other track.
+/// The kit seq track @p t plays. Empty for any other track.
 std::string track_kit(const crosspad::AudioSong& song, int t)
 {
-    const int route = song.seqRoute(t);
-    if (route < 0 || song.tracks[t].source != crosspad::SeqSource::Kit) return {};
-    return route == 1 ? song.tracks[t].kit : song.kit;
+    return song.seqRoute(t) == 0 ? song.tracks[t].kit : std::string();
 }
 
 std::string track_title(const crosspad::AudioSong& song, int t)
@@ -194,6 +191,7 @@ lv_obj_t* s_projLabel = nullptr;
 lv_obj_t* s_mixBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_syncBtn = nullptr;
+lv_obj_t* s_quantBtn = nullptr;  ///< Q: the grid a take is snapped to, beside SYNC
 lv_obj_t* s_editBtn = nullptr;   ///< the timeline's EDIT, beside SYNC
 lv_obj_t* s_followBtn = nullptr; ///< FOLLOW: the timeline keeps the playhead in view while playing
 /* Kept across openings of the screen, as the player left it: on, the lanes
@@ -204,7 +202,6 @@ lv_obj_t* s_headNum[kTracks] = {};
 lv_obj_t* s_headName[kTracks] = {};
 lv_obj_t* s_headIce[kTracks] = {};
 lv_obj_t* s_headMon[kTracks] = {};
-lv_obj_t* s_headProg[kTracks] = {};
 
 /* A frozen track's mark beside its name: a snowflake, 13 px of alpha drawn in
  * the image's recolour (kIce), so no font has to carry the glyph. */
@@ -266,7 +263,6 @@ uint32_t  s_drawnBars = 0;
 /* The track whose bounce is running, so its kind is flipped when the WAV
  * lands and not a moment before: until then the notes are still what plays. */
 int       s_bouncing = -1;
-bool        s_kit2Pads     = false;   ///< kKit2Logic is pushed
 lv_timer_t* s_soundTimer   = nullptr;
 bool        s_visible      = false;   ///< this screen is the one on top
 bool        s_soundHeld    = false;   ///< the instrument was borrowed for the song
@@ -360,16 +356,7 @@ TrackSound track_sound(const crosspad::AudioSong& song, int t)
     const auto& tr = song.tracks[t];
     if (!tr.inUse || tr.kind != crosspad::TrackKind::Seq) return TrackSound::Ok;
     const auto& ps = crosspad::getPlatformServices();
-    const int route = song.liveRoute(t);
-    if (route == 1 || route == 3) {
-        const crosspad::ISecondKit* k = route == 3 ? ps.thirdKit : ps.secondKit;
-        if (!k) return TrackSound::Ok;
-        const auto st = k->state();
-        return st == crosspad::ISecondKit::State::Loading ? TrackSound::Loading
-             : st == crosspad::ISecondKit::State::Failed  ? TrackSound::Failed
-                                                          : TrackSound::Ok;
-    }
-    if (route == 2 && ps.instrumentHost) {
+    if (song.liveRoute(t) == 2 && ps.instrumentHost) {
         const auto st = ps.instrumentHost->state();
         return st == crosspad::IInstrumentHost::State::Busy   ? TrackSound::Loading
              : st == crosspad::IInstrumentHost::State::Failed ? TrackSound::Failed
@@ -399,10 +386,10 @@ uint32_t song_shape(const crosspad::AudioSong& s)
     mix((uint32_t)lroundf(s.bpm * 100.0f));     // where each clip's waveform falls on the bars
     /* The kit badges: a kit loaded in the kit browser is the song's too. */
     for (char c : s.kit) mix((uint8_t)c);
-    /* ARM and the kit slots: which track plays live, which is parked or on
-     * its freeze (the headers' marks); the slots move after an ARM. */
+    /* ARM and the live kit track: which track plays live, which is parked or
+     * on its freeze (the headers' marks); the engine moves after an ARM. */
     mix((uint32_t)(int32_t)s.armed);
-    for (int8_t k : s.kitSlots) mix((uint32_t)(int32_t)k);
+    mix((uint32_t)(int32_t)s.liveKit);
     for (int t = 0; t < kTracks; ++t) {
         for (char c : s.tracks[t].kit) mix((uint8_t)c);
         mix(0xABCDu + t);
@@ -526,34 +513,38 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
      * No back button and no PLAY: back is the power button's click, and the
      * transport is the bar above. ZOOM takes the place the two zoom keys had
      * on the tool row, which is where the export puts it. */
-    s_projBtn = make_button(s_root, 58, "", project_cb);
+    s_projBtn = make_button(s_root, 52, "", project_cb);
     place(s_projBtn, 6, ARR_Y(35));
     s_projLabel = lv_obj_get_child(s_projBtn, 0);
     lv_label_set_long_mode(s_projLabel, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_projLabel, 52);
+    lv_obj_set_width(s_projLabel, 46);
     lv_obj_set_style_text_align(s_projLabel, LV_TEXT_ALIGN_CENTER, 0);
 
     /* MIX beside the song, where the export's dim "18 bars" was: the
      * tracks' desk one press away (it was only a long press on a track's
      * button), and the position is the top bar's anyway. */
-    s_mixBtn = make_button(s_root, 42, "MIX", mix_cb);
-    place(s_mixBtn, 67, ARR_Y(35));
+    s_mixBtn = make_button(s_root, 36, "MIX", mix_cb);
+    place(s_mixBtn, 62, ARR_Y(35));
 
     /* EDIT here is the timeline's: the loop region, copy / paste, merging,
      * the song's length, a clip from the library (edit_cb). The key at the
      * foot is the clip's (clip_edit_cb). */
     /* FOLLOW, an arrow beside the position it follows; the keys after it a
      * little narrower than the export's, to make the room. */
-    s_followBtn = make_button(s_root, 24, LV_SYMBOL_RIGHT, follow_cb);
+    s_followBtn = make_button(s_root, 22, LV_SYMBOL_RIGHT, follow_cb);
     place(s_followBtn, kCtxSong.follow, ARR_Y(35));
-    s_editBtn = make_button(s_root, 38, "EDIT", edit_cb);
+    s_editBtn = make_button(s_root, 34, "EDIT", edit_cb);
     lv_obj_add_event_cb(s_editBtn, edit_hold_cb, LV_EVENT_LONG_PRESSED, nullptr);   // held: undo
-    place(s_editBtn, 139, ARR_Y(35));
-    s_syncBtn = make_button(s_root, 42, "SYNC", sync_cb);
-    place(s_syncBtn, 180, ARR_Y(35));
-    s_loopBtn = make_button(s_root, 42, "LOOP", loop_cb);
+    place(s_editBtn, 128, ARR_Y(35));
+    s_syncBtn = make_button(s_root, 34, "SYNC", sync_cb);
+    place(s_syncBtn, 166, ARR_Y(35));
+    /* Q: what a REC or DUB here snaps to, the Sequencer's own setting --
+     * on this screen too, so a take is not a trip to the seq view first. */
+    s_quantBtn = make_button(s_root, 34, "1/16", quant_cb);
+    place(s_quantBtn, 204, ARR_Y(35));
+    s_loopBtn = make_button(s_root, 34, "LOOP", loop_cb);
     place(s_loopBtn, kCtxSong.loop, ARR_Y(35));
-    s_zoomBtn = make_button(s_root, 42, "ZOOM", zoom_cycle_cb);
+    s_zoomBtn = make_button(s_root, 34, "ZOOM", zoom_cycle_cb);
     place(s_zoomBtn, kCtxSong.zoom, ARR_Y(35));
     elements_build_crumbs(s_root);
 
@@ -619,20 +610,6 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
         lv_obj_remove_flag(ice, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(ice, LV_OBJ_FLAG_HIDDEN);
         s_headIce[t] = ice;
-        /* A freeze or bounce of this track running: a line along the
-         * header's foot grows with it. Nothing over the lanes -- the track
-         * plays live meanwhile, and a box there took the taps meant for the
-         * blocks under it. */
-        lv_obj_t* prog = lv_obj_create(h);
-        lv_obj_remove_style_all(prog);
-        lv_obj_set_pos(prog, 2, kLaneH - 3);
-        lv_obj_set_size(prog, 0, 2);
-        lv_obj_set_style_radius(prog, 1, 0);
-        lv_obj_set_style_bg_color(prog, kIce, 0);
-        lv_obj_set_style_bg_opa(prog, LV_OPA_COVER, 0);
-        lv_obj_remove_flag(prog, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(prog, LV_OBJ_FLAG_HIDDEN);
-        s_headProg[t] = prog;
         auto toggle = [&](int32_t x, const char* text) {
             lv_obj_t* b = lv_obj_create(h);
             lv_obj_remove_style_all(b);
@@ -930,10 +907,6 @@ void Arrange_destroy(lv_obj_t* root)
         crosspad::getPadManager().popPadLogic();
     }
     s_soundPads = false;
-    if (s_kit2Pads && crosspad::getPadManager().getActivePadLogic() == kKit2Logic) {
-        crosspad::getPadManager().popPadLogic();
-    }
-    s_kit2Pads = false;
     /* The song keeps playing when the screen closes -- it is the song
      * engine's, not this screen's. Only the widgets go. */
 #ifdef ARR_USE_ENCODER
@@ -970,7 +943,6 @@ void Arrange_destroy(lv_obj_t* root)
     for (auto& l : s_headName) l = nullptr;
     for (auto& i : s_headIce) i = nullptr;
     for (auto& m : s_headMon) m = nullptr;
-    for (auto& p : s_headProg) p = nullptr;
     drag_forget();
     for (auto& b : s_headMute) b = nullptr;
     for (auto& b : s_headSolo) b = nullptr;
@@ -982,7 +954,7 @@ void Arrange_destroy(lv_obj_t* root)
     /* the status line went with the screen */
     s_root = s_timeline = s_playhead = s_projLabel = s_mixBtn = nullptr;
     s_headCol = s_meterCol = nullptr;
-    s_zoomBtn = s_loopBtn = s_syncBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
+    s_zoomBtn = s_loopBtn = s_syncBtn = s_quantBtn = s_editBtn = s_projBtn = s_followBtn = nullptr;
 
 #ifdef ARR_USE_ENCODER
     if (indev_encoderTop && s_prevEncGroup) lv_indev_restore_group(indev_encoderTop, s_prevEncGroup);

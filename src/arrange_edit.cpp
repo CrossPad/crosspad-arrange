@@ -542,6 +542,23 @@ void sync_cb(lv_event_t*)
     sync_transport();
 }
 
+/// Q: the next grid a take snaps to, round the Sequencer's own list, free
+/// (no snapping) last.
+void quant_cb(lv_event_t*)
+{
+    auto* sq = crosspad::getPlatformServices().sequencer;
+    if (!sq) return;
+    using Q = crosspad::Quantization;
+    static const Q kRound[] = {Q::Quarter, Q::Eighth, Q::EighthTriplet, Q::Sixteenth,
+                               Q::SixteenthTriplet, Q::ThirtySecond, Q::Off};
+    constexpr size_t kCount = sizeof(kRound) / sizeof(kRound[0]);
+    const Q now = sq->getQuantization();
+    size_t i = 0;
+    while (i < kCount && kRound[i] != now) ++i;
+    sq->setQuantization(kRound[i + 1 < kCount ? i + 1 : 0]);
+    sync_transport();
+}
+
 /// From the selected block, or from the top: the place you are looking at is
 /// the place you want to hear.
 /// Zoom about the middle of what is on screen: the bar there stays there.

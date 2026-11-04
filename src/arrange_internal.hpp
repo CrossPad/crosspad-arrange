@@ -24,7 +24,6 @@
 #include "crosspad/instrument/InstrumentPlayState.hpp"
 #include "crosspad/kit/IKitManager.hpp"
 #include "crosspad/kit/IKitPicker.hpp"
-#include "crosspad/sampler/ISecondKit.hpp"
 #include "crosspad/pad/PadManager.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/song/ArrangeAudioTake.hpp"
@@ -75,10 +74,10 @@ inline constexpr int      kShownTracks = 4;
 inline constexpr int32_t  kExportTop = 33;
 #define ARR_Y(v) ((v) - kExportTop)
 /* The context row's keys that move when an element is open: the breadcrumbs
- * take the place of the project button, the position, EDIT and SYNC, and the
- * keys left close up behind them; EDIT goes to the key at the row's end. */
+ * take the place of the project button, the position, EDIT, SYNC and Q, and
+ * the keys left close up behind them; EDIT goes to the key at the row's end. */
 struct CtxKeys { int32_t follow, loop, zoom; };
-inline constexpr CtxKeys kCtxSong    = {112, 225, 270};
+inline constexpr CtxKeys kCtxSong    = {102, 242, 280};
 inline constexpr CtxKeys kCtxElement = {152, 180, 225};
 inline constexpr int32_t kCtxMoreX   = 270;       ///< where ZOOM stood
 inline constexpr int32_t kCrumbsW    = kCtxElement.follow - 4 - 6;   ///< from the row's left edge to FOLLOW
@@ -136,8 +135,8 @@ inline const lv_color_t kWave   = lv_color_hex(0x9CD639);     // a meter's green
 
 /* ── the tracks a player makes (UX 2000 section 6) ────────────────────────
  * Arrange holds kTracks tracks, any of them seqs (a scene each): kit tracks, a
- * kit each, taking turns on the second kit engine and playing their freeze
- * while they wait (kit_slot()), and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
+ * kit each, taking turns on the kits' engine -- the armed one plays live, the
+ * others their freeze (live_kit()) --, and a Pitch track (AudioSong::freeSeqRoute()). A track comes from
  * the "+ ADD TRACK" row -- AUDIO is recorded into here, KITS asks for Perf,
  * Drums, Slice or Pitch, also recorded into here -- and any track
  * can be bounced to audio at any time, which is also how a seq slot is freed
@@ -196,9 +195,6 @@ struct Block {
 /* A Pitch seq track's sound (sound_keeper_cb, by Arrange_create). */
 inline constexpr const char* kSoundLogic = "ArrangePitch";
 
-/* The second kit's pads, while its track is armed (sound_keeper_cb). */
-inline constexpr const char* kKit2Logic = "ArrangeKit2";
-
 /* MOVE, DUP, DEL (the selected block's, reached by clicking it), then EDIT. */
 inline constexpr int kBlockTools = 3;
 
@@ -236,6 +232,7 @@ extern lv_obj_t* s_projLabel;
 extern lv_obj_t* s_mixBtn;
 extern lv_obj_t* s_loopBtn;
 extern lv_obj_t* s_syncBtn;
+extern lv_obj_t* s_quantBtn;
 extern lv_obj_t* s_editBtn;
 extern lv_obj_t* s_followBtn;
 extern bool      s_follow;
@@ -244,7 +241,6 @@ extern lv_obj_t* s_headNum[kTracks];
 extern lv_obj_t* s_headName[kTracks];
 extern lv_obj_t* s_headMon[kTracks];   ///< an audio track's input monitored: a speaker before its name
 extern lv_obj_t* s_headIce[kTracks];   ///< a frozen track's snowflake, before its name
-extern lv_obj_t* s_headProg[kTracks];  ///< a freeze or bounce running: how far, along the header's foot
 extern lv_obj_t* s_headMute[kTracks];
 extern lv_obj_t* s_headSolo[kTracks];
 extern lv_obj_t* s_headArm[kTracks];
@@ -264,7 +260,6 @@ extern uint8_t   s_seqLaneScene;
 extern uint32_t  s_seqTicksBar;
 extern uint32_t  s_drawnBars;
 extern int       s_bouncing;
-extern bool        s_kit2Pads;
 extern lv_timer_t* s_soundTimer;
 extern bool        s_visible;
 extern bool        s_soundHeld;
@@ -377,6 +372,7 @@ void head_cb(lv_event_t* e);
 void loop_cb(lv_event_t*);
 void follow_cb(lv_event_t*);
 void sync_cb(lv_event_t*);
+void quant_cb(lv_event_t*);
 void zoom_cycle_cb(lv_event_t*);
 void close_overlay();
 lv_obj_t* overlay_open();
@@ -417,8 +413,9 @@ void mix_forget();
 void mix_meters(crosspad::ISongEngine* se);
 void style_toggle(lv_obj_t* b, bool on, lv_color_t col);
 void mix_cb(lv_event_t*);
-/// The track a freeze or bounce of ours is rendering and how far it is (0..100).
-bool freeze_progress(crosspad::ISongEngine* se, int& track, unsigned& pct);
+bool freeze_progress(crosspad::ISongEngine* se, char* buf, size_t cap);
+/// No pad, touch or encoder for kIdleBakeMs: the player has let the board be.
+bool player_away();
 void sound_keeper_cb(lv_timer_t*);
 void sound_keeper_start();
 void request_list(Pending what, const char* title);

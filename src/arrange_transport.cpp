@@ -45,6 +45,15 @@ void sync_transport()
     set_ink(lv_obj_get_child(s_syncBtn, 0), sync ? kInk : kDim);
     set_bg(s_followBtn, s_follow ? kAccent : kPanel);
     set_ink(lv_obj_get_child(s_followBtn, 0), s_follow ? kInk : kDim);
+    if (auto* sq = crosspad::getPlatformServices().sequencer; sq && s_quantBtn) {
+        using Q = crosspad::Quantization;
+        const Q q = sq->getQuantization();
+        const char* grid = q == Q::Quarter ? "1/4" : q == Q::Eighth ? "1/8" : q == Q::EighthTriplet ? "1/8T"
+                         : q == Q::Sixteenth ? "1/16" : q == Q::SixteenthTriplet ? "1/16T"
+                         : q == Q::ThirtySecond ? "1/32" : "free";
+        set_text(lv_obj_get_child(s_quantBtn, 0), grid);
+        set_ink(lv_obj_get_child(s_quantBtn, 0), q == Q::Off ? kDim : kText);
+    }
 }
 
 /// The meters beside the lanes, from what each track is playing: straight
@@ -75,33 +84,15 @@ static void show_meters(crosspad::ISongEngine* se)
     }
 }
 
+static bool s_procFreeze = false;   ///< the box says a freeze, not a time stretch
 static bool s_procElement = false;  ///< the box says an element's enter, leave or bake
-static int  s_progTrack = -1;       ///< the header whose foot shows a freeze's progress
 
-/// A freeze or bounce of ours: a line along its track header's foot.
-static void show_freeze(crosspad::ISongEngine* se)
-{
-    int track = -1;
-    unsigned pct = 0;
-    if (!freeze_progress(se, track, pct)) track = -1;
-    if (s_progTrack >= 0 && s_progTrack != track && s_headProg[s_progTrack]) {
-        lv_obj_add_flag(s_headProg[s_progTrack], LV_OBJ_FLAG_HIDDEN);
-    }
-    s_progTrack = track;
-    if (track < 0 || !s_headProg[track]) return;
-    lv_obj_t* p = s_headProg[track];
-    const int32_t w = std::max<int32_t>(2, (int32_t)((kHeadW - 4) * pct / 100));
-    if (lv_obj_get_width(p) != w) lv_obj_set_width(p, w);
-    if (lv_obj_has_flag(p, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN);
-}
-
-/// Stretched or repitched blocks still being fitted to the tempo, or an
-/// element entered, left or baked: a box over the lanes for as long as either
-/// runs -- a stretch is made only while stopped, and until then those blocks
-/// play as they were. A freeze says so on its track's header (show_freeze()).
+/// A track freezing, stretched or repitched blocks still being fitted to the
+/// tempo, or an element entered, left or baked: a box over the lanes for as
+/// long as any runs -- a freeze and a stretch are made only while stopped,
+/// and until then those blocks play as they were.
 static void show_processing(crosspad::ISongEngine* se)
 {
-    show_freeze(se);
     if (!s_procBox) return;
     const bool up = !lv_obj_has_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
     char fbuf[72];
@@ -116,6 +107,22 @@ static void show_processing(crosspad::ISongEngine* se)
     }
     if (s_procElement) {
         s_procElement = false;
+        if (up && !se->stretchWaiting()) {
+            lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+    }
+    if (freeze_progress(se, fbuf, sizeof(fbuf))) {
+        s_procFreeze = true;
+        set_text(s_procLabel, fbuf);
+        if (!up) {
+            lv_obj_remove_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_procBox);
+        }
+        return;
+    }
+    if (s_procFreeze) {
+        s_procFreeze = false;
         if (up && !se->stretchWaiting()) {
             lv_obj_add_flag(s_procBox, LV_OBJ_FLAG_HIDDEN);
             return;
@@ -224,7 +231,7 @@ void tick_cb(lv_timer_t*)
     if (s_bouncing >= 0) {
         const crosspad::BounceStatus st = se->bounceStatus();
         if (st.state == crosspad::BounceState::Running) {
-            /* How far: its header's foot (show_freeze()). */
+            /* How far: the processing box (freeze_progress()). */
         } else {
             const int track = s_bouncing;
             s_bouncing = -1;
