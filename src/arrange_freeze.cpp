@@ -47,12 +47,10 @@ static bool song_has_pitch_track()
  * stale since (its notes, its kit, the tempo) -- is frozen while the song is
  * stopped, with this screen up (the seq view and Pitch Play use the sequencer a
  * freeze takes), one at a time (crosspad::autoFreezeNext()), so the tracks not
- * being played cost a file's stream instead of an engine. Only an ARM change
- * froze before: a tempo turned or a kit picked left every track live for good
- * (26.10.2026). PLAY, REC and DUB cancel a freeze, and the next stop finishes it
- * from the renders already on the card; a freeze that failed is tried again
- * later, later still each time (crosspad::RetryBackoff). A song opened carries
- * nothing over. */
+ * being played cost a file's stream instead of an engine. PLAY, REC and DUB
+ * cancel a freeze, and the next stop finishes it from the renders already on
+ * the card; a freeze that failed is tried again later, later still each time
+ * (crosspad::RetryBackoff). A song opened carries nothing over. */
 static std::string s_freezeSong;
 /// How long a mixdown waits for a kit track's kit to come into the kits' engine.
 constexpr uint32_t kExportWaitMs = 20000;
@@ -98,8 +96,8 @@ static bool engine_holds(const crosspad::AudioSong& song, int t)
  * engine stays the armed track's, or a freeze giving way to the pads swung
  * it back and forth, loading one kit after the other under them. A track the
  * engine went to keeps it while its kit comes in, as long as the player stays
- * away: taken back at once, the engine went to it and back every tick with
- * a kit track armed, its kit never came and it never froze (30.10.2026). A kit
+ * away: taken back at once, the engine would go to it and back every tick with
+ * a kit track armed, its kit would never come and it would never freeze. A kit
  * that has not come in kVisitLoadMs is tried again later. @p st is
  * freezeState() of each track, @p skip the tracks whose last freeze failed
  * and is not due again. */
@@ -306,7 +304,7 @@ void sound_keeper_cb(lv_timer_t*)
             /* It would not load -- no memory beside the kits, say: asked for again
              * later, later still each time, and said once. A host left Failed by
              * someone else's load is asked at once: it never turns Idle by itself,
-             * and the Pitch track stayed silent for good (26.10.2026). */
+             * and the Pitch track would stay silent for good. */
             if (s_soundAsked) {
                 s_soundAsked = false;
                 s_soundRetry.failed(now);
@@ -368,8 +366,8 @@ void sound_keeper_cb(lv_timer_t*)
 /// The fingers on the Pitch track's instrument while it is armed. Only the
 /// fingers: the song's notes on the kits' route (the
 /// Drums track, EventSource::SequencerCallback) go on to the base logic --
-/// pushed over it, the instrument played the drum track's notes and the kit
-/// fell silent (hil_perf_song C, 2026-10-22).
+/// pushed over it, the instrument would play the drum track's notes and the
+/// kit would fall silent.
 class PitchFingers final : public crosspad::IPadLogicHandler {
 public:
     void onActivate(crosspad::PadManager& pm) override { pitch().onActivate(pm); }

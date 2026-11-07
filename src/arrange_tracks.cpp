@@ -211,7 +211,7 @@ static int make_seq_track(crosspad::SeqSource src, const std::string& kit)
      * the player switches scenes somewhere else -- the one just added, not
      * the active one: while the transport runs that is still the old scene
      * until the loop ends, another track's, and the new track's seq view
-     * cleared it and kept its notes (22.10.2026). With all eight there, the
+     * would clear it and keep its notes. With all eight there, the
      * lowest scene no track plays. */
     const bool added = sq && sq->addScene();
     int made = -1;

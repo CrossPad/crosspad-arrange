@@ -77,8 +77,8 @@ uint32_t s_libraryGen    = 0;
 bool     s_rebaking = false;
 
 /// A block that can be baked only on the engine -- its element's kit tracks frozen at
-/// another tempo, after the top bar's BPM turned -- played its old bake, pitched by
-/// the varispeed, until someone found "Rebake now" in EDIT (26.10.2026). With the
+/// another tempo, after the top bar's BPM turned -- plays its old bake, pitched by
+/// the varispeed, until it is rebaked ("Rebake now" in EDIT). With the
 /// song stopped and nothing touched for kAutoRebakeMs, the rebake runs by itself,
 /// one element at a time, its processing box up; one that fails waits its turn
 /// again on a RetryBackoff of its own.

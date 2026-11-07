@@ -433,7 +433,7 @@ static void leave_region_edit();
 /// and out of the app with none of them left. A block that is only picked is
 /// not a step: the encoder picks one by walking over it, the pick outlives
 /// the screen, and a click spent unpicking it showed nothing but a 2 px
-/// outline going, so getting out took two clicks or more (12.10.2026). (The
+/// outline going, so getting out would take two clicks or more. (The
 /// encoder's edit mode and the top bar's focus are stepped out of before this
 /// is asked: powerBack().) Inside an element, what is left goes up one level
 /// (elements_back()); while that is being baked, a click is spent on waiting.
