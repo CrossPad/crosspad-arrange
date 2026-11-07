@@ -314,6 +314,12 @@ static void kit_picked(const std::string& path, void*)
     se->commit();
 }
 
+void new_kit_track(const std::string& path)
+{
+    s_kitPickTrack = -1;
+    kit_picked(path, nullptr);
+}
+
 static void pick_kit_for(int track, crosspad::KitList list)
 {
     auto* se = engine();

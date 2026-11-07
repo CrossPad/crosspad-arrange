@@ -31,6 +31,7 @@
 #include "crosspad/song/ElementNav.hpp"
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad/song/SeqTrackSound.hpp"
+#include "crosspad/song/SongSounds.hpp"
 #include "crosspad/transport/SongTransport.hpp"
 #include "crosspad/util/RetryBackoff.hpp"
 #include "crosspad-gui/components/app_orchestrator.h"
@@ -394,6 +395,9 @@ uint32_t playhead_bar();
 void edit_cb(lv_event_t*);
 void edit_hold_cb(lv_event_t*);
 void seq_track_made(int made);
+/// A new kit track playing @p path, as ADD TRACK -> KITS makes one; picked
+/// once this screen shows (s_afterPick).
+void new_kit_track(const std::string& path);
 void bounce_sheet();
 void delete_track_sheet();
 void add_track_cb(lv_event_t*);
