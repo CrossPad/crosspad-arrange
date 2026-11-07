@@ -532,8 +532,8 @@ void request_list(Pending what, const char* title)
 }
 
 /// Songs one page of the list builds: a row is a few kB of objects, and a card
-/// with fifty songs built none past the 24th -- the newest "Song N" could not
-/// be opened from here (26.10.2026). The rest is a "More ..." away.
+/// with fifty songs built none past the 24th, so the newest "Song N" could not
+/// be opened from here. The rest is a "More ..." away.
 static constexpr size_t kSongRows = 24;
 
 static void fill_projects_from(size_t from);
