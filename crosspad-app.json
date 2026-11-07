@@ -1,7 +1,7 @@
 {
   "name": "Arrange",
   "id": "arrange",
-  "version": "0.42.2",
+  "version": "0.43.0",
   "description": "Four audio tracks of bounced clips on a timeline",
   "category": "music",
   "icon": "arrange.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=2.43.0,<3.0.0",
+    "crosspad-core": ">=2.45.0,<3.0.0",
     "crosspad-gui": ">=2.0.0,<3.0.0"
   },
   "changelog": [
+    "0.43.0: A kit picked away from Arrange no longer changes the song behind the player's back. On the way back into Arrange a question comes first: Replace on T<n> (the track plays the new kit) or New track (a kit track of its own with the new kit, the old track keeping its kit and freeze). Until then the old track plays its freeze. A kit picked from a track's seq view (CLIP EDIT) is still that track's. Requires core 2.45.",
     "0.42.2: Muting or un-muting the Pitch track no longer stops the song. With the Pitch track armed, its M let go of the instrument and loaded it again on the un-mute, and each swap of the engines stopped the playback. A muted Pitch track now keeps its instrument; its notes stay silent while it is muted.",
     "0.42.1: A kit track ARM is not on now freezes while another kit track is armed: the kits' engine went to it and was taken back by the armed track the next moment, before its kit came in, so in a full arrangement the freeze never started and the header blinked. The engine now stays on the track it went to freeze until its kit is in, as long as the player leaves the board alone (a kit that does not come in 30 s is tried again later). A frozen track's header keeps its snowflake and its name in one place and one font while the engine visits it, instead of showing LOADING and a longer, then shorter name.",
     "0.42.0: Q on the context row, between SYNC and LOOP: the grid a REC or DUB snaps to (1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32, free), the Sequencer's own setting, so a take is not a trip to the seq view first; the row's keys are a few pixels narrower for it. Each kit track plays and records with its own swing (core 2.43). A freeze or bounce shows in the box over the lanes again (FREEZING TRACK n, render x of y), not as a line on its header. The kits' engine leaves the armed track to freeze another kit track only once the player has let the board be for 5 s: under the fingers a freeze giving way to the pads swung it back and forth, loading one kit after the other and trying the freeze again and again. Requires core 2.43.",

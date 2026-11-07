@@ -865,6 +865,12 @@ lv_obj_t* Arrange_create(lv_obj_t* parent, App* app)
 #ifdef ARR_USE_ENCODER
             if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
+            /* A kit picked away from here, answered "New track" on the way
+             * in (core SongSounds::resolveKitChoice()). */
+            if (auto* ss = crosspad::getPlatformServices().songSounds) {
+                const std::string kit = ss->takeNewTrackKit();
+                if (!kit.empty()) new_kit_track(kit);
+            }
             /* Back from the kit loader with a new kit track: picked, as a
              * track made here is. */
             if (s_afterPick >= 0) {
