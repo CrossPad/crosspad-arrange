@@ -22,7 +22,12 @@ namespace arrange_ui {
 // It outlives the screen (the song does), so it is a timer of its own and
 // never deleted. LVGL task only.
 
-/// The song has a Pitch seq track that plays (in use, not silenced).
+/// The song has a Pitch seq track in use -- muted or soloed out too. A mute
+/// is not a reason to give the instrument back: core silences the muted
+/// route's notes itself (applySeqSound), while letting go of it reset the
+/// engine arena under the playing song. With the Pitch track armed, every
+/// M on it swapped the engines (PitchedKit out, the kit in, and back on
+/// the un-mute) and the arena reset ended the playback.
 static bool song_has_pitch_track()
 {
     auto* se = engine();
@@ -32,7 +37,7 @@ static bool song_has_pitch_track()
     for (int i = 0; i < kTracks; ++i) {
         const auto& t = song.tracks[i];
         if (t.inUse && t.kind == crosspad::TrackKind::Seq &&
-            t.source == crosspad::SeqSource::Pitch && !song.silenced(i)) return true;
+            t.source == crosspad::SeqSource::Pitch) return true;
     }
     return false;
 }
