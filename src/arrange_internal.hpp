@@ -267,6 +267,7 @@ extern bool        s_soundHeld;
 extern bool        s_soundAsked;
 extern std::string s_soundPath;
 extern crosspad::RetryBackoff s_soundRetry;
+extern uint8_t     s_soundFails;
 extern bool        s_soundSaid;
 extern bool        s_soundPads;
 extern bool        s_soundBounce;
