@@ -269,6 +269,7 @@ bool        s_soundHeld    = false;   ///< the instrument was borrowed for the s
 bool        s_soundAsked   = false;   ///< a load was asked for since the host was last Idle
 std::string s_soundPath;               ///< the instrument the keeper asks for
 crosspad::RetryBackoff s_soundRetry;   ///< after a load of it failed, on lv_tick
+uint8_t     s_soundFails   = 0;       ///< loads of it that failed, up to InstrumentLoadNote::kSayAfter
 bool        s_soundSaid    = false;   ///< its failure was said
 bool        s_soundPads    = false;   ///< kSoundLogic is pushed
 bool        s_soundBounce  = false;   ///< a bounce of the Pitch track is capturing it

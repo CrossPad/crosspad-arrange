@@ -2,6 +2,7 @@
 // auto-freeze of the seq tracks ARM is not on, and which kit track the kits' engine plays.
 
 #include "arrange_internal.hpp"
+#include "crosspad/instrument/InstrumentLoadNote.hpp"
 #include "crosspad/song/SongSounds.hpp"
 
 #include "crosspad/song/AutoFreeze.hpp"
@@ -295,22 +296,29 @@ void sound_keeper_cb(lv_timer_t*)
         if (path != s_soundPath) {
             s_soundPath = path;
             s_soundRetry.reset();
+            s_soundFails = 0;
             s_soundSaid = false;
         }
         if (st == crosspad::IInstrumentHost::State::Ready) {
             s_soundAsked = false;
             s_soundRetry.reset();
+            s_soundFails = 0;
         } else if (st == crosspad::IInstrumentHost::State::Failed) {
             /* It would not load -- no memory beside the kits, say: asked for again
-             * later, later still each time, and said once. A host left Failed by
-             * someone else's load is asked at once: it never turns Idle by itself,
-             * and the Pitch track would stay silent for good. */
+             * later, later still each time, and said once the retry failed too
+             * (the first try often fails only while the auto-freeze bounces).
+             * A host left Failed by someone else's load is asked at once: it
+             * never turns Idle by itself, and the Pitch track would stay silent
+             * for good. */
             if (s_soundAsked) {
                 s_soundAsked = false;
                 s_soundRetry.failed(now);
-                if (!s_soundSaid) {
+                if (s_soundFails < crosspad::InstrumentLoadNote::kSayAfter) ++s_soundFails;
+                if (s_soundFails >= crosspad::InstrumentLoadNote::kSayAfter && !s_soundSaid) {
                     s_soundSaid = true;
-                    note_fmt("Pitch sound did not load: %s", host->message().c_str());
+                    char msg[96];
+                    crosspad::InstrumentLoadNote::text(host->message(), msg, sizeof(msg));
+                    note(msg);
                 }
             } else if (s_soundRetry.due(now)) {
                 s_soundAsked = host->requestOpen(path);
